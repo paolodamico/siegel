@@ -103,4 +103,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: dtolnay/install@cargo-docs-rs
       - run: |
-          cargo +nightly docs-rs
+          cargo +nightly docs-rs -p siegel
+          cargo +nightly docs-rs -p siegel-uniffi
