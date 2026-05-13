@@ -1,5 +1,5 @@
 [workspace]
-members = ["siegel"]
+members = ["siegel", "siegel-uniffi"]
 resolver = "2"
 
 [workspace.package]
@@ -12,6 +12,7 @@ authors = [
 
 [workspace.dependencies]
 uniffi = { version = "0.31.0", features = ["build"] }
+thiserror = { version = "2" }
 
 [profile.release]
 debug = false

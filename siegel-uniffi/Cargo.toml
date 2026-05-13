@@ -1,6 +1,6 @@
 [package]
-name = "siegel"
-description = "Protected memory management for one-time use secrets."
+name = "siegel-uniffi"
+description = "UniFFI bindings for Siegel. Enables sharing memory-protected secrets between foreign code and Rust."
 readme = "../README.md"
 version.workspace = true
 edition.workspace = true
@@ -8,12 +8,12 @@ license.workspace = true
 authors.workspace = true
 
 [lib]
-name = "siegel"
+name = "siegel_uniffi"
 
 [dependencies]
-libc = "0.2"
+siegel = { path = "../siegel" }
 thiserror = { workspace = true }
-zeroize = { version = "1", features = ["derive"] }
+uniffi = { workspace = true }
 
 [dev-dependencies]
 sha2 = "0.10"
