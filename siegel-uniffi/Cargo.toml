@@ -12,7 +12,7 @@ repository.workspace = true
 name = "siegel_uniffi"
 
 [dependencies]
-siegel = { path = "../siegel" }
+siegel = { workspace = true }
 thiserror = { workspace = true }
 uniffi = { workspace = true }
 
