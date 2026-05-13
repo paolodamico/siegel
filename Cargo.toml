@@ -8,6 +8,7 @@ license = "MIT"
 version = "0.1.0"
 authors = [
     "Paolo D'Amico <5864173+paolodamico@users.noreply.github.com>",
+]
 
 [workspace.dependencies]
 uniffi = { version = "0.31.0", features = ["build"] }
