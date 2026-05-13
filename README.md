@@ -1,5 +1,8 @@
 ![header image](./header-image.jpg)
 
+> [!WARNING]  
+> This code is currently UNAUDITED. Please be careful with any use.
+
 # 🧧siegel
 
 > Siegel from the german word for seal
@@ -53,11 +56,15 @@ The design focuses on making it harder to do unsafe behavior. For example, it ta
 ```rust
 use siegel::{Siegel, Empty};
 
-let empty: Siegel<Empty> = Siegel::new(32)?;
-let loaded = empty.write(&secret_bytes)?;
-let signature = loaded.use_and_consume(|secret| {
-    sign_something(secret, &payload)
-})?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let secret_bytes = [0x42; 32]; // load your secret from it's safe storage place
+    let empty: Siegel<Empty> = Siegel::new(32)?;
+    let loaded = empty.write(&secret_bytes)?;
+    let signature = loaded.read_once(|secret| {
+        // sign_something(secret, &payload)
+    })?;
+    Ok(())
+}
 ```
 
 ## Foreign-code usage (`siegel-uniffi`)

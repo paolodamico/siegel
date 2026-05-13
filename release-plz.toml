@@ -1,0 +1,16 @@
+[workspace]
+git_release_enable = true
+git_release_type = "auto"
+pr_labels = ["release"]
+release = false
+publish = false
+
+[[package]]
+name = "siegel"
+release = true
+publish = true
+
+[[package]]
+name = "siegel-uniffi"
+release = true
+publish = true
