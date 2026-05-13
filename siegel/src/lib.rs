@@ -1,4 +1,4 @@
-#![doc = include_str!("../../README.md")]
+#![doc = include_str!("../README.md")]
 
 use std::marker::PhantomData;
 use zeroize::{Zeroize, ZeroizeOnDrop};
