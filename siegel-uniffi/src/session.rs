@@ -29,7 +29,7 @@ static NEXT_HANDLE: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(1));
 /// The session wraps an internal `Siegel<Empty>` or `Siegel<Loaded>`
 /// behind a `Mutex` so it can be driven through `&self` methods.
 /// [`siegel_fill`] writes bytes into the empty siegel and transitions
-/// the state to `Loaded`; [`use_and_consume`](Self::use_and_consume)
+/// the state to `Loaded`; [`read_once`](Self::read_once)
 /// runs the application operation against the loaded siegel and wipes.
 #[derive(uniffi::Object)]
 pub struct SiegelSession {
@@ -43,7 +43,7 @@ impl SiegelSession {
     ///
     /// Foreign code retrieves [`SiegelSession::handle`], calls [`siegel_fill`]
     /// to write the bytes, then calls the application's `#[uniffi::export]`
-    /// function (which internally invokes [`SiegelSession::use_and_consume`]).
+    /// function (which internally invokes [`SiegelSession::read_once`]).
     ///
     /// # Errors
     ///
@@ -141,14 +141,14 @@ pub const FILL_ERR_PROTECTION: i32 = -5;
 /// creates a new buffer of the bytes in transit.
 ///
 /// # Arguments
-/// - `handle`: the opaque handler received from [`SiegelSession::handle_id`].
+/// - `handle`: the opaque handler received from [`SiegelSession::handle`].
 /// - `src`: the raw pointer to the bytes to copy.
 /// - `len`: the size of the data.
 ///
 /// # Safety
 ///
 /// - `src` **MUST** be valid for `len` bytes of read. This is the caller's responsibility.
-/// - The caller must not race fills against `use_and_consume` or
+/// - The caller must not race fills against `read_once` or
 ///   `obliviate` on the same session.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siegel_fill(handle: u64, src: *const u8, len: usize) -> i32 {
