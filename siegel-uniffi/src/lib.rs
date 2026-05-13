@@ -10,7 +10,7 @@
 //! memory pointers. This addresses the issue that when passing values between
 //! the foreign boundary through `UniFFI`, any value is byte copied, which leads
 //! to dangling non-zeroized copies of secrets in memory.
-#![doc = include_str!("../../README.md")]
+#![doc = include_str!("../README.md")]
 
 mod session;
 

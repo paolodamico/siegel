@@ -1,13 +1,15 @@
 ![header image](./header-image.jpg)
 
 > [!WARNING]  
-> This code is currently UNAUDITED. Please be careful with any use.
+> This code is currently **UNAUDITED**. Please be careful with any use.
 
 # 🧧siegel
 
 > Siegel from the german word for seal
 
 Siegel is a simple package that offers best-effort protected memory allocation for loading and using secrets.
+
+Please see the [main `siegel` README](siegel/README.md).
 
 ## Motivation
 
@@ -19,62 +21,6 @@ For these use cases, Siegel provides a type-safe mechanism to loaad secrets into
 
 Siegel particularly focuses on secrets that must cross foreign boundaries. For example, if you have a zero-knowledge proof system relying on a secret stored in the device's keychain but the specific operations must be performed on the Rust side.
 
+## Documentation
 
-## Design
-
-The design focuses on making it harder to do unsafe behavior. For example, it takes the opinionated approach of secrets being one-time use so that secrets only live in application memory for the time they are actually required. In addition to this, when secrets are in memory they are:
-- `mlock`ed to prevent swapping to disk.
-- `mprotect`-sealed to prevent reading outside of a very explicit scope.
-- Zeroized on drop.
-- Page-aligned and protected by a canary for page overflows.
-- Guarded at the beginning and end to prevent accidental over/underflows.
-
-
-## What's protected
-
-- ✅ Bugs within the process where memory where the secret is stored is accidentally read.
-- ✅ Stale pointer dereferences the sealed secret (`PROT_NONE` segfaults)
-- ✅ Secret swapped to disk (already not applicable on iOS).
-- ✅ UniFFI copies the secret into additional buffers for lowering/lifting which results in unzeroized copies of the secret.
-- ✅ Closure panics mid-operation. Secret is still zeroized as long as there is panic unwinding.
-- ✅ Makes accidental logging of secrets hard. Secret is only accessible within an explicit closure.
-
-## What's NOT Protected
-
-- 🔴 **Compromised device** where an attacker has arbitrary code execution within the app process. Memory permissions can simply be updated and the secret extracted.
-- 🔴 Jailbroken / rooted devices. Memory protections may be bypassed and memory location inspected.
-- 🔴 Memory hardware attacks.
-- 🔴 The brief window during the read and write inside closures. This window cannot be reduced.
-- 🔴 Mistakes by consumers of this package. Particularly, callers could accidentally log the secret, copy it elsewhere, etc.
-- 🔴 Panics where the process aborts without triggering `Drop`s. The secret may live in memory until the OS clears it.
-
-
-
-## Example
-
-
-```rust
-use siegel::{Siegel, Empty};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let secret_bytes = [0x42; 32]; // load your secret from it's safe storage place
-    let empty: Siegel<Empty> = Siegel::new(32)?;
-    let loaded = empty.write(&secret_bytes)?;
-    let signature = loaded.read_once(|secret| {
-        // sign_something(secret, &payload)
-    })?;
-    Ok(())
-}
-```
-
-## Foreign-code usage (`siegel-uniffi`)
-
-The secret is filled in the foreign side (e.g. from the Keychain) and consumed once on the Rust side.
-
-```text
-1. let session = SiegelSession::new(len: u32) -> Arc<SiegelSession>
-2. session.handle() -> u64
-3. siegel_fill(handle, ptr, len) -> i32         [raw extern "C"]
-4. application own function calls
-   session.read_once(|bytes| ...)               [Rust closure]
-```
+See [docs.rs](https://docs.rs/siegel)

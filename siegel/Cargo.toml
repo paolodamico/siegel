@@ -1,11 +1,12 @@
 [package]
 name = "siegel"
 description = "Protected memory management for one-time use secrets."
-readme = "../README.md"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [lib]
 name = "siegel"
