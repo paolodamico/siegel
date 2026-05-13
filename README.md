@@ -1,5 +1,8 @@
 ![header image](./header-image.jpg)
 
+> [!WARNING]  
+> This code is currently UNAUDITED. Please be careful with any use.
+
 # 🧧siegel
 
 > Siegel from the german word for seal
