@@ -1,0 +1,22 @@
+[package]
+name = "secure-uniffi"
+description = "Secure secret sharing between Rust and native platforms via UniFFI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "secure_uniffi"
+
+[dependencies]
+libc = "0.2"
+thiserror = "2"
+uniffi.workspace = true
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+sha2 = "0.10"
+
+
+[lints]
+workspace = true
