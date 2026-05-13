@@ -16,7 +16,7 @@ pub use protected::{ProtectedRegion, ProtectionError};
 /// 3. Use it to sign an operation.
 ///
 /// [`Siegel::new`] initializes a new empty `Siegel`. A secret can be
-/// filled via [`Siegel::write`], and subsequently used with [`Siegel::use_and_consume`].
+/// filled via [`Siegel::write`], and subsequently used with [`Siegel::read_once`].
 pub struct Siegel<State> {
     region: ProtectedRegion,
     _state: PhantomData<State>,
