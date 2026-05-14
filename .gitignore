@@ -1,2 +1,10 @@
 /target
 Cargo.lock
+
+# Swift artifacts
+/swift/*.xcframework
+/swift/Sources/
+/swift/ios_build/
+/swift/tests/Sources/Siegel/*.swift
+/swift/tests/.build/
+/swift/tests/*.xcodeproj/
