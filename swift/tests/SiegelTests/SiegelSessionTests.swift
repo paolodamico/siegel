@@ -20,7 +20,7 @@ private let FILL_ERR_WRONG_STATE: Int32 = -4
 
 private func fill(_ session: SiegelSession, _ bytes: [UInt8]) -> Int32 {
     bytes.withUnsafeBufferPointer { buf in
-        siegel_fill(session.id(), buf.baseAddress, buf.count)
+        siegel_fill(session.handleId(), buf.baseAddress, buf.count)
     }
 }
 
@@ -29,7 +29,7 @@ final class SiegelSessionTests: XCTestCase {
     func testNewSessionIsNotConsumed() throws {
         let session = try SiegelSession(len: 32)
         XCTAssertFalse(session.isConsumed())
-        XCTAssertEqual(session.id(), session.id())
+        XCTAssertEqual(session.handleId(), session.handleId())
     }
 
     func testZeroLengthRejected() {
@@ -55,7 +55,7 @@ final class SiegelSessionTests: XCTestCase {
 
     func testFillRejectsNullSrc() throws {
         let session = try SiegelSession(len: 8)
-        XCTAssertEqual(siegel_fill(session.id(), nil, 8), FILL_ERR_NULL_SRC)
+        XCTAssertEqual(siegel_fill(session.handleId(), nil, 8), FILL_ERR_NULL_SRC)
     }
 
     func testFillRejectsUnknownHandle() {
@@ -129,7 +129,7 @@ final class SiegelSessionTests: XCTestCase {
     func testDistinctSessionsHaveDistinctHandles() throws {
         let a = try SiegelSession(len: 8)
         let b = try SiegelSession(len: 8)
-        XCTAssertNotEqual(a.id(), b.id())
+        XCTAssertNotEqual(a.handleId(), b.handleId())
     }
 
     func testHandleInvalidatedAfterSessionDrop() throws {
@@ -140,7 +140,7 @@ final class SiegelSessionTests: XCTestCase {
         autoreleasepool {
             // swiftlint:disable:next force_try
             let session = try! SiegelSession(len: 8)
-            handle = session.id()
+            handle = session.handleId()
         }
         let bytes = [UInt8](repeating: 0, count: 8)
         let rc = bytes.withUnsafeBufferPointer { buf in
