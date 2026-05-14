@@ -19,9 +19,9 @@ pub use session::{
     FILL_ERR_WRONG_STATE, FILL_OK, SessionError, SiegelSession, siegel_fill,
 };
 
-#[cfg(feature = "test_utils")]
+#[cfg(feature = "test-utils")]
 mod test_utils;
-#[cfg(feature = "test_utils")]
+#[cfg(feature = "test-utils")]
 pub use test_utils::sha256_consume;
 
 uniffi::setup_scaffolding!();

@@ -203,6 +203,17 @@ impl Drop for ProtectedRegion {
 
 impl ZeroizeOnDrop for ProtectedRegion {}
 
+#[cfg(feature = "test-utils")]
+impl ProtectedRegion {
+    pub(crate) fn data(&self) -> *mut u8 {
+        self.data
+    }
+
+    pub(crate) fn data_pages_len(&self) -> usize {
+        self.data_pages_len
+    }
+}
+
 /// Permission state of the data pages. Mirrors libsodium's `sodium_mprotect_*`
 /// modes and dryoc's `traits::{NoAccess, ReadOnly, ReadWrite}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
