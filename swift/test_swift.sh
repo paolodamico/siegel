@@ -57,20 +57,30 @@ fi
 
 rm -rf "$TESTS_PATH/.build" 2>/dev/null || true
 
-echo "Step 4: running xcodebuild test"
+printf 'Step 4: running xcodebuild test %b(output buffered; set VERBOSE=1 to stream)%b\n' "$DIM" "$NC"
 cd "$TESTS_PATH"
 
 LOG_FILE="$(mktemp -t siegel-xctest.XXXXXX)"
 trap 'rm -f "$LOG_FILE"' EXIT
 
 set +e
-xcodebuild test \
-    -scheme SiegelIntegrationTests \
-    -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
-    -sdk iphonesimulator \
-    CODE_SIGNING_ALLOWED=NO \
-    2>&1 | tee "$LOG_FILE"
-XCODE_STATUS=${PIPESTATUS[0]}
+if [ "${VERBOSE:-0}" = "1" ]; then
+    xcodebuild test \
+        -scheme SiegelIntegrationTests \
+        -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+        -sdk iphonesimulator \
+        CODE_SIGNING_ALLOWED=NO \
+        2>&1 | tee "$LOG_FILE"
+    XCODE_STATUS=${PIPESTATUS[0]}
+else
+    xcodebuild test \
+        -scheme SiegelIntegrationTests \
+        -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+        -sdk iphonesimulator \
+        CODE_SIGNING_ALLOWED=NO \
+        >"$LOG_FILE" 2>&1
+    XCODE_STATUS=$?
+fi
 set -e
 
 # Parse xcodebuild's log. Each test emits one "started" and exactly one

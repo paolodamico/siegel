@@ -18,9 +18,10 @@ if [[ "$OUTPUT_DIR" != /* ]]; then
     OUTPUT_DIR="$BASE_PATH/$OUTPUT_DIR"
 fi
 
-# Build with the test_utils feature so the foreign test suite can reach
-# `sha256_consume`. Production consumers should rebuild without it.
-FEATURES="test_utils"
+# Build with the test-utils feature so the foreign test suite can reach
+# `sha256_consume` + the segfault helpers. Production consumers should
+# rebuild without it.
+FEATURES="test-utils"
 
 SWIFT_SOURCES_DIR="$OUTPUT_DIR/Sources/$SWIFT_MODULE"
 HEADERS_DIR="$BASE_PATH/ios_build/Headers/$SWIFT_MODULE"

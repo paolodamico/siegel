@@ -252,6 +252,54 @@ impl From<SiegelError> for SessionError {
     }
 }
 
+/// Resolve a registry handle to a [`SiegelSession`] reference. Used by `test_utils` only.
+#[cfg(feature = "test-utils")]
+pub(crate) fn lookup_session(handle: u64) -> Option<Arc<SiegelSession>> {
+    registry_lock().get(&handle).and_then(Weak::upgrade)
+}
+
+#[cfg(feature = "test-utils")]
+impl SiegelSession {
+    /// Touch the active siegel's front guard page. No-op if consumed.
+    ///
+    /// # Safety
+    /// Intentionally crashes the process. Forked child only.
+    pub(crate) unsafe fn test_touch_front_guard(&self) {
+        let state = lock_state(&self.state);
+        match &*state {
+            SessionState::Empty(s) => unsafe { s.test_touch_front_guard() },
+            SessionState::Loaded(s) => unsafe { s.test_touch_front_guard() },
+            SessionState::Consumed => {}
+        }
+    }
+
+    /// Touch the active siegel's back guard page. No-op if consumed.
+    ///
+    /// # Safety
+    /// Intentionally crashes the process. Forked child only.
+    pub(crate) unsafe fn test_touch_back_guard(&self) {
+        let state = lock_state(&self.state);
+        match &*state {
+            SessionState::Empty(s) => unsafe { s.test_touch_back_guard() },
+            SessionState::Loaded(s) => unsafe { s.test_touch_back_guard() },
+            SessionState::Consumed => {}
+        }
+    }
+
+    /// Touch the active siegel's sealed data region. No-op if consumed.
+    ///
+    /// # Safety
+    /// Intentionally crashes the process when the region is sealed.
+    pub(crate) unsafe fn test_touch_sealed_data(&self) {
+        let state = lock_state(&self.state);
+        match &*state {
+            SessionState::Empty(s) => unsafe { s.test_touch_sealed_data() },
+            SessionState::Loaded(s) => unsafe { s.test_touch_sealed_data() },
+            SessionState::Consumed => {}
+        }
+    }
+}
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
