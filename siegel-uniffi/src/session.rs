@@ -272,32 +272,6 @@ impl SiegelSession {
             SessionState::Consumed => {}
         }
     }
-
-    /// Touch the active siegel's back guard page. No-op if consumed.
-    ///
-    /// # Safety
-    /// Intentionally crashes the process. Forked child only.
-    pub(crate) unsafe fn test_touch_back_guard(&self) {
-        let state = lock_state(&self.state);
-        match &*state {
-            SessionState::Empty(s) => unsafe { s.test_touch_back_guard() },
-            SessionState::Loaded(s) => unsafe { s.test_touch_back_guard() },
-            SessionState::Consumed => {}
-        }
-    }
-
-    /// Touch the active siegel's sealed data region. No-op if consumed.
-    ///
-    /// # Safety
-    /// Intentionally crashes the process when the region is sealed.
-    pub(crate) unsafe fn test_touch_sealed_data(&self) {
-        let state = lock_state(&self.state);
-        match &*state {
-            SessionState::Empty(s) => unsafe { s.test_touch_sealed_data() },
-            SessionState::Loaded(s) => unsafe { s.test_touch_sealed_data() },
-            SessionState::Consumed => {}
-        }
-    }
 }
 
 #[cfg(test)]

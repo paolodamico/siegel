@@ -4,46 +4,25 @@ import XCTest
 
 @testable import Siegel
 
-// These helpers fork a child inside Rust (Swift's iOS Darwin module hides
-// `fork(2)`), have the child read into a guard / sealed page, then return
-// the terminating signal observed by the parent (`SIGSEGV` or `SIGBUS`)
+// Forks a child inside Rust (Swift's iOS Darwin module hides `fork(2)`),
+// has the child read one byte from the front guard page, then returns the
+// terminating signal observed by the parent — `SIGSEGV` or `SIGBUS` when
+// the protection is in force.
+//
+// One foreign segfault test is enough to verify the binding boundary is
+// wired up. The full matrix of front/back guards + sealed data + canary
+// is covered by Rust unit tests in the `siegel` crate.
 @_silgen_name("unsafe_test_only_siegel_front_guard_seg_fault")
 private func unsafe_test_only_siegel_front_guard_seg_fault(_ handle: UInt64) -> Int32
-@_silgen_name("unsafe_test_only_siegel_back_guard_seg_fault")
-private func unsafe_test_only_siegel_back_guard_seg_fault(_ handle: UInt64) -> Int32
-@_silgen_name("unsafe_test_only_siegel_sealed_data_seg_fault")
-private func unsafe_test_only_siegel_sealed_data_seg_fault(_ handle: UInt64) -> Int32
 
 final class SiegelGuardTests: XCTestCase {
 
-    private func assertCrashSignal(
-        _ signal: Int32,
-        file: StaticString = #file,
-        line: UInt = #line
-    ) {
+    func testReadingProtectedMemorySegfaults() throws {
+        let session = try SiegelSession(len: 64)
+        let signal = unsafe_test_only_siegel_front_guard_seg_fault(session.handleId())
         XCTAssertTrue(
             signal == SIGSEGV || signal == SIGBUS,
-            "expected SIGSEGV (\(SIGSEGV)) or SIGBUS (\(SIGBUS)), got \(signal)",
-            file: file,
-            line: line
+            "expected SIGSEGV (\(SIGSEGV)) or SIGBUS (\(SIGBUS)), got \(signal)"
         )
-    }
-
-    func testReadingFrontGuardPageSegfaults() throws {
-        let session = try SiegelSession(len: 64)
-        assertCrashSignal(unsafe_test_only_siegel_front_guard_seg_fault(session.handleId()))
-    }
-
-    func testReadingBackGuardPageSegfaults() throws {
-        let session = try SiegelSession(len: 64)
-        assertCrashSignal(unsafe_test_only_siegel_back_guard_seg_fault(session.handleId()))
-    }
-
-    /// The canary lives inside the protected data region. Once sealed
-    /// (`PROT_NONE`, the at-rest state), any read into it — including the
-    /// canary bytes — must trap.
-    func testReadingSealedDataSegfaults() throws {
-        let session = try SiegelSession(len: 64)
-        assertCrashSignal(unsafe_test_only_siegel_sealed_data_seg_fault(session.handleId()))
     }
 }

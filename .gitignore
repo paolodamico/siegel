@@ -1,6 +1,9 @@
 /target
 Cargo.lock
 
+# IDE
+.zed/
+
 # Swift artifacts
 /swift/*.xcframework
 /swift/Sources/

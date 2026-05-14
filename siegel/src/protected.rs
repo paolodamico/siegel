@@ -205,12 +205,11 @@ impl ZeroizeOnDrop for ProtectedRegion {}
 
 #[cfg(feature = "test-utils")]
 impl ProtectedRegion {
+    /// Feature-gated accessor used by `test_utils::test_touch_front_guard`
+    /// to compute a guard-page address. Kept minimal — the data pointer is
+    /// the only piece of geometry the front-guard test needs.
     pub(crate) fn data(&self) -> *mut u8 {
         self.data
-    }
-
-    pub(crate) fn data_pages_len(&self) -> usize {
-        self.data_pages_len
     }
 }
 

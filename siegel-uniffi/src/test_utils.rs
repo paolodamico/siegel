@@ -99,28 +99,3 @@ pub unsafe extern "C" fn unsafe_test_only_siegel_front_guard_seg_fault(handle: u
     fork_and_run(|| unsafe { session.test_touch_front_guard() })
 }
 
-/// Test-only: fork a child that reads one byte from the back guard page.
-///
-/// # Safety
-/// See [`unsafe_test_only_siegel_front_guard_seg_fault`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn unsafe_test_only_siegel_back_guard_seg_fault(handle: u64) -> i32 {
-    let Some(session) = lookup_session(handle) else {
-        return ERR_INVALID_HANDLE;
-    };
-    fork_and_run(|| unsafe { session.test_touch_back_guard() })
-}
-
-/// Test-only: fork a child that reads one byte from the sealed data region.
-/// The canary sits inside this region — segfaulting here covers both
-/// "accessing the data while sealed" and "accessing the canary".
-///
-/// # Safety
-/// See [`unsafe_test_only_siegel_front_guard_seg_fault`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn unsafe_test_only_siegel_sealed_data_seg_fault(handle: u64) -> i32 {
-    let Some(session) = lookup_session(handle) else {
-        return ERR_INVALID_HANDLE;
-    };
-    fork_and_run(|| unsafe { session.test_touch_sealed_data() })
-}
