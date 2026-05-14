@@ -1,0 +1,19 @@
+[package]
+name = "uniffi-bindgen"
+description = "uniffi-bindgen CLI for generating foreign bindings for siegel-uniffi."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/main.rs"
+
+[dependencies]
+uniffi = { workspace = true, features = ["cli"] }
+
+[lints]
+workspace = true
