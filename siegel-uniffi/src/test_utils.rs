@@ -98,4 +98,3 @@ pub unsafe extern "C" fn unsafe_test_only_siegel_front_guard_seg_fault(handle: u
     };
     fork_and_run(|| unsafe { session.test_touch_front_guard() })
 }
-

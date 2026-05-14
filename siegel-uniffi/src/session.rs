@@ -41,7 +41,7 @@ pub struct SiegelSession {
 impl SiegelSession {
     /// Open a new session sized for `len` bytes.
     ///
-    /// Foreign code retrieves [`SiegelSession::handle`], calls [`siegel_fill`]
+    /// Foreign code retrieves [`SiegelSession::handle_id()`], calls [`siegel_fill`]
     /// to write the bytes, then calls the application's `#[uniffi::export]`
     /// function (which internally invokes [`SiegelSession::read_once`]).
     ///
@@ -141,7 +141,7 @@ pub const FILL_ERR_PROTECTION: i32 = -5;
 /// creates a new buffer of the bytes in transit.
 ///
 /// # Arguments
-/// - `handle`: the opaque handler received from [`SiegelSession::handle`].
+/// - `handle`: the opaque handler received from [`SiegelSession::handle_id()`].
 /// - `src`: the raw pointer to the bytes to copy.
 /// - `len`: the size of the data.
 ///
