@@ -1,5 +1,5 @@
 [workspace]
-members = ["siegel", "siegel-uniffi"]
+members = ["siegel", "siegel-uniffi", "uniffi-bindgen"]
 resolver = "2"
 
 [workspace.package]

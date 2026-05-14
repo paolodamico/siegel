@@ -41,7 +41,7 @@ pub struct SiegelSession {
 impl SiegelSession {
     /// Open a new session sized for `len` bytes.
     ///
-    /// Foreign code retrieves [`SiegelSession::handle`], calls [`siegel_fill`]
+    /// Foreign code retrieves [`SiegelSession::handle_id()`], calls [`siegel_fill`]
     /// to write the bytes, then calls the application's `#[uniffi::export]`
     /// function (which internally invokes [`SiegelSession::read_once`]).
     ///
@@ -71,7 +71,7 @@ impl SiegelSession {
     /// Opaque identifier handle for [`siegel_fill`].
     ///
     /// Stable for the lifetime of the session.
-    pub fn handle(&self) -> u64 {
+    pub fn handle_id(&self) -> u64 {
         self.handle_id
     }
 
@@ -141,7 +141,7 @@ pub const FILL_ERR_PROTECTION: i32 = -5;
 /// creates a new buffer of the bytes in transit.
 ///
 /// # Arguments
-/// - `handle`: the opaque handler received from [`SiegelSession::handle`].
+/// - `handle`: the opaque handler received from [`SiegelSession::handle_id()`].
 /// - `src`: the raw pointer to the bytes to copy.
 /// - `len`: the size of the data.
 ///
@@ -252,6 +252,28 @@ impl From<SiegelError> for SessionError {
     }
 }
 
+/// Resolve a registry handle to a [`SiegelSession`] reference. Used by `test_utils` only.
+#[cfg(feature = "test-utils")]
+pub(crate) fn lookup_session(handle: u64) -> Option<Arc<SiegelSession>> {
+    registry_lock().get(&handle).and_then(Weak::upgrade)
+}
+
+#[cfg(feature = "test-utils")]
+impl SiegelSession {
+    /// Touch the active siegel's front guard page. No-op if consumed.
+    ///
+    /// # Safety
+    /// Intentionally crashes the process. Forked child only.
+    pub(crate) unsafe fn test_touch_front_guard(&self) {
+        let state = lock_state(&self.state);
+        match &*state {
+            SessionState::Empty(s) => unsafe { s.test_touch_front_guard() },
+            SessionState::Loaded(s) => unsafe { s.test_touch_front_guard() },
+            SessionState::Consumed => {}
+        }
+    }
+}
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
@@ -260,14 +282,14 @@ mod tests {
     use super::*;
 
     fn fill(session: &Arc<SiegelSession>, bytes: &[u8]) -> i32 {
-        unsafe { siegel_fill(session.handle(), bytes.as_ptr(), bytes.len()) }
+        unsafe { siegel_fill(session.handle_id(), bytes.as_ptr(), bytes.len()) }
     }
 
     #[test]
     fn begin_session_starts_empty() {
         let s = SiegelSession::new(32).unwrap();
         assert!(!s.is_consumed());
-        assert_eq!(s.handle(), s.handle());
+        assert_eq!(s.handle_id(), s.handle_id());
     }
 
     #[test]
@@ -298,7 +320,7 @@ mod tests {
     #[test]
     fn fill_rejects_null_src() {
         let s = SiegelSession::new(8).unwrap();
-        let rc = unsafe { siegel_fill(s.handle(), std::ptr::null(), 8) };
+        let rc = unsafe { siegel_fill(s.handle_id(), std::ptr::null(), 8) };
         assert_eq!(rc, FILL_ERR_NULL_SRC);
     }
 
@@ -365,7 +387,7 @@ mod tests {
     fn handle_invalidated_after_session_drop() {
         let handle = {
             let s = SiegelSession::new(8).unwrap();
-            s.handle()
+            s.handle_id()
         };
         let rc = unsafe { siegel_fill(handle, [0u8; 8].as_ptr(), 8) };
         assert_eq!(rc, FILL_ERR_INVALID_HANDLE);
@@ -375,6 +397,6 @@ mod tests {
     fn distinct_sessions_have_distinct_handles() {
         let a = SiegelSession::new(8).unwrap();
         let b = SiegelSession::new(8).unwrap();
-        assert_ne!(a.handle(), b.handle());
+        assert_ne!(a.handle_id(), b.handle_id());
     }
 }

@@ -69,6 +69,30 @@ jobs:
         run: |
           cargo build
 
+  swift-test:
+    name: Test Swift Bindings
+    runs-on: macos-14
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Select Xcode 16.2
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "16.2"
+
+      - name: Set up Rust with iOS targets
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios-sim,aarch64-apple-ios,x86_64-apple-ios
+
+      - name: Build and run Swift integration tests
+        run: ./swift/test_swift.sh
+
   deny:
     name: Cargo deny
     runs-on: ubuntu-latest

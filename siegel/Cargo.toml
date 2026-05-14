@@ -11,6 +11,10 @@ repository.workspace = true
 [lib]
 name = "siegel"
 
+[features]
+# Exposes unsafe helpers for tests
+test-utils = []
+
 [dependencies]
 libc = "0.2"
 thiserror = { workspace = true }

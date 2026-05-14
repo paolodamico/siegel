@@ -203,6 +203,16 @@ impl Drop for ProtectedRegion {
 
 impl ZeroizeOnDrop for ProtectedRegion {}
 
+#[cfg(feature = "test-utils")]
+impl ProtectedRegion {
+    /// Feature-gated accessor used by `test_utils::test_touch_front_guard`
+    /// to compute a guard-page address. Kept minimal — the data pointer is
+    /// the only piece of geometry the front-guard test needs.
+    pub(crate) fn data(&self) -> *mut u8 {
+        self.data
+    }
+}
+
 /// Permission state of the data pages. Mirrors libsodium's `sodium_mprotect_*`
 /// modes and dryoc's `traits::{NoAccess, ReadOnly, ReadWrite}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

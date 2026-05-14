@@ -10,11 +10,20 @@ repository.workspace = true
 
 [lib]
 name = "siegel_uniffi"
+# `staticlib` + `cdylib` are required for iOS cross-compilation (integration tests)
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[features]
+# Exposes `sha256_consume` to foreign bindings. Used by the Swift / Kotlin
+# integration test suites to drive `read_once` end-to-end. Not for production use.
+test-utils = ["dep:sha2", "dep:libc", "siegel/test-utils"]
 
 [dependencies]
 siegel = { workspace = true }
 thiserror = { workspace = true }
 uniffi = { workspace = true }
+libc = { version = "0.2", optional = true } # `libc` is only used by the `test_utils`
+sha2 = { version = "0.10", optional = true }
 
 [dev-dependencies]
 sha2 = "0.10"

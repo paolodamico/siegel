@@ -6,6 +6,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 mod protected;
 pub use protected::{ProtectedRegion, ProtectionError};
 
+#[cfg(feature = "test-utils")]
+mod test_utils;
+
 /// Container for a single secret in protected memory. Type safe.
 ///
 /// A Siegel is structured so a secret can only be "used" (i.e. read)
