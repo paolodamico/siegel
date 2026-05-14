@@ -23,8 +23,8 @@ if ! xcodebuild -showsdks | grep -q 'iphonesimulator'; then
     exit 1
 fi
 
-echo "Step 1: building Swift bindings"
-bash "$BASE_PATH/build_swift.sh"
+echo "Step 1: building Swift bindings (sim-only — tests don't need device/Intel slices)"
+bash "$BASE_PATH/build_swift.sh" --sim-only
 [ -d "$BASE_PATH/${SWIFT_MODULE}.xcframework" ] || { echo "Missing XCFramework" >&2; exit 1; }
 
 echo "Step 2: copying generated Swift sources into the test package"

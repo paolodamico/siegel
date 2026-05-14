@@ -84,13 +84,18 @@ jobs:
         with:
           xcode-version: "16.2"
 
-      - name: Set up Rust with iOS targets
+      - name: Set up Rust with iOS Simulator target
+        # macos-14 runners are Apple Silicon, so the iOS simulator is
+        # arm64. The device + Intel-sim slices aren't needed for tests;
+        # `test_swift.sh` passes `--sim-only` to `build_swift.sh`.
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
-          targets: aarch64-apple-ios-sim,aarch64-apple-ios,x86_64-apple-ios
+          targets: aarch64-apple-ios-sim
 
       - name: Build and run Swift integration tests
+        env:
+          VERBOSE: 1
         run: ./swift/test_swift.sh
 
   deny:
