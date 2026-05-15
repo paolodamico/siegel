@@ -11,3 +11,13 @@ Cargo.lock
 /swift/tests/Sources/Siegel/*.swift
 /swift/tests/.build/
 /swift/tests/*.xcodeproj/
+
+# Kotlin / Gradle artifacts
+/kotlin/.gradle/
+/kotlin/build/
+/kotlin/libs/
+/kotlin/gradle/
+/kotlin/gradlew
+/kotlin/gradlew.bat
+/kotlin/**/build/
+/kotlin/siegel-tests/src/test/kotlin/uniffi/

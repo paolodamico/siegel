@@ -48,9 +48,19 @@ fn fork_and_run(work: impl FnOnce()) -> i32 {
         return ERR_FORK_FAILED;
     }
     if pid == 0 {
-        // Child: suppress core dumps to keep CrashReporter quiet, then run
-        // the unsafe work. If `work` returns instead of crashing, exit
-        // cleanly so the parent observes ERR_NOT_SIGNALED.
+        // Child: reset SIGSEGV/SIGBUS to the kernel default so test runners
+        // that install their own handlers (HotSpot on the JVM, XCTest on
+        // Darwin, etc.) don't intercept the fault and abort the child with
+        // a different signal (e.g. `SIGABRT` on JVM).
+        // SAFETY: signal() is async-signal-safe.
+        unsafe {
+            libc::signal(libc::SIGSEGV, libc::SIG_DFL);
+            libc::signal(libc::SIGBUS, libc::SIG_DFL);
+        }
+
+        // Suppress core dumps to keep CrashReporter quiet, then run the
+        // unsafe work. If `work` returns instead of crashing, exit cleanly
+        // so the parent observes ERR_NOT_SIGNALED.
         let lim = libc::rlimit {
             rlim_cur: 0,
             rlim_max: 0,
