@@ -23,6 +23,11 @@ static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Mutex::new(HashMap::new()
 /// Starts at 1 so 0 can represent the _nil_ state.
 static NEXT_HANDLE: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(1));
 
+/// Max concurrent live sessions. Bounds mlocked memory on platforms where
+/// `RLIMIT_MEMLOCK` is enforced (typically Linux server / containers).
+/// Pruned opportunistically on every `SiegelSession::new`.
+const MAX_ACTIVE_SESSIONS: usize = 1024;
+
 /// One-time secret-handling session, held by foreign code as
 /// `Arc<SiegelSession>`.
 ///
@@ -35,6 +40,8 @@ static NEXT_HANDLE: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(1));
 pub struct SiegelSession {
     state: Mutex<SessionState>,
     handle_id: u64,
+    /// Bytes the session was allocated for. Stable for its lifetime.
+    capacity: u32,
 }
 
 #[uniffi::export]
@@ -48,16 +55,31 @@ impl SiegelSession {
     /// # Errors
     ///
     /// `SessionError::InvalidLength` for `len == 0` or `len > 1 MiB`.
+    /// `SessionError::TooManyActiveSessions` if the registry is at the
+    /// [`MAX_ACTIVE_SESSIONS`] cap.
     /// Allocation / protection / lock errors propagate from `siegel`.
     #[uniffi::constructor]
     pub fn new(len: u32) -> Result<Arc<Self>, SessionError> {
-        let len = usize::try_from(len).map_err(|_| SessionError::InvalidLength)?;
-        let empty = Siegel::<Empty>::new(len)?;
+        let len_usize = usize::try_from(len).map_err(|_| SessionError::InvalidLength)?;
+
+        // Prune dropped entries and reject if the live registry is full.
+        // Done before allocating the protected region to avoid burning OS
+        // resources on a request we will refuse.
+        {
+            let mut registry = registry_lock();
+            registry.retain(|_, w| w.strong_count() > 0);
+            if registry.len() >= MAX_ACTIVE_SESSIONS {
+                return Err(SessionError::TooManyActiveSessions);
+            }
+        }
+
+        let empty = Siegel::<Empty>::new(len_usize)?;
 
         let handle_id = allocate_handle_id();
         let session = Arc::new(Self {
             state: Mutex::new(SessionState::Empty(empty)),
             handle_id,
+            capacity: len,
         });
 
         registry_lock().insert(handle_id, Arc::downgrade(&session));
@@ -73,6 +95,17 @@ impl SiegelSession {
     /// Stable for the lifetime of the session.
     pub fn handle_id(&self) -> u64 {
         self.handle_id
+    }
+
+    /// Capacity of the session in bytes.
+    ///
+    /// Stable for the lifetime of the session. Callers can use this to
+    /// verify the session matches the size they expected before invoking
+    /// [`read_once`](Self::read_once).
+    #[must_use]
+    #[expect(clippy::len_without_is_empty, reason = "sessions are always non-empty")]
+    pub fn len(&self) -> u32 {
+        self.capacity
     }
 
     /// Wipe the session without using it. Idempotent.
@@ -229,6 +262,8 @@ pub enum SessionError {
     InvalidState,
     #[error("session has been consumed")]
     Consumed,
+    #[error("too many active sessions (max {MAX_ACTIVE_SESSIONS})")]
+    TooManyActiveSessions,
     #[error("memory allocation failed: {reason}")]
     AllocationFailed { reason: String },
     #[error("memory protection failed: {reason}")]
@@ -398,5 +433,32 @@ mod tests {
         let a = SiegelSession::new(8).unwrap();
         let b = SiegelSession::new(8).unwrap();
         assert_ne!(a.handle_id(), b.handle_id());
+    }
+
+    #[test]
+    fn len_reports_allocated_capacity() {
+        let s = SiegelSession::new(64).unwrap();
+        assert_eq!(s.len(), 64);
+        // Capacity stays stable across state transitions.
+        assert_eq!(fill(&s, &[7u8; 64]), FILL_OK);
+        assert_eq!(s.len(), 64);
+        s.read_once(<[u8]>::to_vec).unwrap();
+        assert_eq!(s.len(), 64);
+    }
+
+    /// Sessions dropped on the foreign side should not pin the registry
+    /// forever. The opportunistic prune in `new` makes capacity available
+    /// again for subsequent allocations.
+    #[test]
+    fn registry_prunes_dropped_sessions() {
+        let handle = {
+            let s = SiegelSession::new(8).unwrap();
+            s.handle_id()
+        };
+        // After the Arc is dropped, the registry entry's Weak has 0 strong
+        // refs; the next `new` should prune it.
+        let _next = SiegelSession::new(8).unwrap();
+        let rc = unsafe { siegel_fill(handle, [0u8; 8].as_ptr(), 8) };
+        assert_eq!(rc, FILL_ERR_INVALID_HANDLE);
     }
 }

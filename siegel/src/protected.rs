@@ -115,7 +115,7 @@ impl ProtectedRegion {
     }
 
     /// Execute `f` with read-only access to the secret bytes.
-    /// Re-seals (no-access) after `f` returns.
+    /// Re-seals (no-access) after `f` returns or panics.
     ///
     /// Scoped equivalent of libsodium's
     /// `sodium_mprotect_readonly` + `sodium_mprotect_noaccess`.
@@ -126,14 +126,17 @@ impl ProtectedRegion {
     /// protection-state transition syscall fails.
     pub fn with_read<T>(&mut self, f: impl FnOnce(&[u8]) -> T) -> Result<T, ProtectionError> {
         self.verify_canary()?;
-        let slice = unsafe { std::slice::from_raw_parts(self.data, self.usable_len) };
-        let result = f(slice);
-        self.mprotect_noaccess()?;
-        Ok(result)
+        let ptr = self.data;
+        let len = self.usable_len;
+        let _reseal = ResealOnDrop(self);
+        // SAFETY: region is currently `PROT_READ`; `_reseal` returns it to
+        // `PROT_NONE` on every exit path, including a closure panic.
+        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+        Ok(f(slice))
     }
 
     /// Execute `f` with read-write access to the secret bytes.
-    /// Re-seals (no-access) after `f` returns.
+    /// Re-seals (no-access) after `f` returns or panics.
     ///
     /// Scoped equivalent of libsodium's
     /// `sodium_mprotect_readwrite` + `sodium_mprotect_noaccess`.
@@ -144,10 +147,13 @@ impl ProtectedRegion {
     pub fn with_write<T>(&mut self, f: impl FnOnce(&mut [u8]) -> T) -> Result<T, ProtectionError> {
         mprotect(self.data, self.data_pages_len, Protection::ReadWrite)?;
         self.protection = Protection::ReadWrite;
-        let slice = unsafe { std::slice::from_raw_parts_mut(self.data, self.usable_len) };
-        let result = f(slice);
-        self.mprotect_noaccess()?;
-        Ok(result)
+        let ptr = self.data;
+        let len = self.usable_len;
+        let _reseal = ResealOnDrop(self);
+        // SAFETY: region is currently `PROT_RW`; `_reseal` returns it to
+        // `PROT_NONE` on every exit path, including a closure panic.
+        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+        Ok(f(slice))
     }
 
     /// Mark the data pages as `PROT_NONE` — no read or write.
@@ -222,6 +228,20 @@ enum Protection {
     ReadWrite,
 }
 
+/// RAII guard that re-seals the region to `PROT_NONE` when dropped.
+///
+/// Used by `with_read` / `with_write` so the scoped accessor re-seals on
+/// every exit path, including closure panics. A failing `mprotect` is
+/// swallowed because the region's own `Drop` will zeroize + munmap
+/// regardless.
+struct ResealOnDrop<'a>(&'a mut ProtectedRegion);
+
+impl Drop for ResealOnDrop<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.mprotect_noaccess();
+    }
+}
+
 /// Errors from protected memory operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ProtectionError {
@@ -263,6 +283,11 @@ fn mmap_anon(len: usize) -> Result<*mut u8, ProtectionError> {
     };
     if ptr == libc::MAP_FAILED {
         return Err(ProtectionError::Mmap(io::Error::last_os_error()));
+    }
+    // Linux/Android only: exclude from core dumps. No-op elsewhere.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe {
+        let _ = libc::madvise(ptr, len, libc::MADV_DONTDUMP);
     }
     Ok(ptr.cast())
 }
