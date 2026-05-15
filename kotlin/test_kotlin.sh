@@ -13,16 +13,41 @@ else
     GREEN=''; RED=''; YELLOW=''; BOLD=''; DIM=''; NC=''
 fi
 
-# Ensure a working JAVA_HOME. CI runners typically set this; on dev macs
-# we look for a Homebrew-installed JDK 17 if nothing is configured.
+# Best-effort JAVA_HOME discovery for local dev. CI sets this directly
+# via setup-java, so this block is only exercised when running by hand.
+# Each branch validates the resolved path before exporting, so we never
+# hand Gradle something like `/usr` (which would happen if you ran two
+# `dirname`s on macOS's `/usr/bin/java` shim).
 if [ -z "${JAVA_HOME:-}" ]; then
-    if [ -d "/opt/homebrew/opt/openjdk@17" ]; then
-        JAVA_HOME="/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
-        export JAVA_HOME
-    elif command -v java >/dev/null 2>&1; then
-        JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v java)" 2>/dev/null || command -v java)")")"
-        export JAVA_HOME
-    fi
+    case "$OSTYPE" in
+        darwin*)
+            # /usr/libexec/java_home is the canonical macOS JDK locator.
+            # `-v 17` asks for the matching major version; if it's missing
+            # we let it fall through unset so Gradle's own error message
+            # surfaces ("install a JDK 17") instead of a confusing one.
+            if [ -x /usr/libexec/java_home ]; then
+                detected="$(/usr/libexec/java_home -v 17 2>/dev/null || true)"
+                if [ -n "$detected" ] && [ -x "$detected/bin/java" ]; then
+                    export JAVA_HOME="$detected"
+                fi
+            fi
+            ;;
+        linux*)
+            # GNU `readlink -f` resolves symlink chains like
+            # /usr/bin/java -> /etc/alternatives/java -> /usr/lib/jvm/.../bin/java
+            # Two `dirname`s then give the JDK home. macOS's BSD readlink
+            # lacks `-f`, which is why this branch is Linux-only.
+            if command -v java >/dev/null 2>&1; then
+                resolved="$(readlink -f "$(command -v java)" 2>/dev/null || true)"
+                if [ -n "$resolved" ]; then
+                    candidate="$(dirname "$(dirname "$resolved")")"
+                    if [ -x "$candidate/bin/java" ]; then
+                        export JAVA_HOME="$candidate"
+                    fi
+                fi
+            fi
+            ;;
+    esac
 fi
 
 echo "Step 1: building host cdylib + Kotlin bindings"
