@@ -57,20 +57,44 @@ cd "$BASE_PATH"
 
 # Bootstrap a Gradle wrapper if the checkout doesn't have one. Pinned to a
 # Gradle version that's compatible with our Kotlin/JVM toolchain (8.x).
+# The SHA-256 is pinned alongside the version so the downloaded archive is
+# verified before any code from it is executed; the published value lives
+# at https://services.gradle.org/distributions/gradle-<ver>-bin.zip.sha256.
+GRADLE_VERSION="8.10.2"
+GRADLE_SHA256="31c55713e40233a8303827ceb42ca48a47267a0ad4bab9177123121e71524c26"
+
 if [ ! -f "gradlew" ]; then
     echo "Step 2: bootstrapping Gradle wrapper..."
-    GRADLE_VERSION="${GRADLE_VERSION:-8.10.2}"
     DIST_URL="https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
     TMP="$(mktemp -d)"
     trap 'rm -rf "$TMP"' EXIT
-    curl -sSL "$DIST_URL" -o "$TMP/gradle.zip"
+    curl --fail -sSL "$DIST_URL" -o "$TMP/gradle.zip"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual_sha="$(sha256sum "$TMP/gradle.zip" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        actual_sha="$(shasum -a 256 "$TMP/gradle.zip" | awk '{print $1}')"
+    else
+        echo "ERROR: neither sha256sum nor shasum is available; cannot verify Gradle distribution" >&2
+        exit 1
+    fi
+    if [ "$actual_sha" != "$GRADLE_SHA256" ]; then
+        echo "ERROR: Gradle distribution SHA-256 mismatch for $DIST_URL" >&2
+        echo "  expected: $GRADLE_SHA256" >&2
+        echo "  actual:   $actual_sha" >&2
+        exit 1
+    fi
+
     mkdir -p "$TMP/unzip"
     if command -v unzip >/dev/null 2>&1; then
         unzip -q "$TMP/gradle.zip" -d "$TMP/unzip"
     else
         (cd "$TMP/unzip" && jar xvf "$TMP/gradle.zip" >/dev/null)
     fi
-    "$TMP/unzip/gradle-${GRADLE_VERSION}/bin/gradle" wrapper --gradle-version "$GRADLE_VERSION" --quiet
+    "$TMP/unzip/gradle-${GRADLE_VERSION}/bin/gradle" wrapper \
+        --gradle-version "$GRADLE_VERSION" \
+        --gradle-distribution-sha256-sum "$GRADLE_SHA256" \
+        --quiet
 fi
 
 TEST_RESULTS_DIR="$BASE_PATH/siegel-tests/build/test-results/test"
