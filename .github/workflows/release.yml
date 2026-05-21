@@ -6,23 +6,27 @@ on:
       - main
   workflow_dispatch:
 
-permissions:
-  contents: write
-  pull-requests: write
-  id-token: write
+permissions: {}
 
 jobs:
   release-crates:
     name: Release Crates
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2 (https://github.com/actions/checkout/releases/tag/v6.0.2)
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch HEAD as of 2026-05-20 (https://github.com/dtolnay/rust-toolchain/tree/stable)
+        with:
+          toolchain: stable
 
       - name: Run release-plz
         uses: release-plz/action@f708778669256143d984cce4b23592637532e040 # v0.5.127 (https://github.com/release-plz/action/releases/tag/v0.5.127)
