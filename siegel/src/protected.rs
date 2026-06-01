@@ -115,7 +115,7 @@ impl ProtectedRegion {
     }
 
     /// Execute `f` with read-only access to the secret bytes.
-    /// Re-seals (no-access) after `f` returns.
+    /// Re-seals (no-access) after `f` returns or panics.
     ///
     /// Scoped equivalent of libsodium's
     /// `sodium_mprotect_readonly` + `sodium_mprotect_noaccess`.
@@ -126,14 +126,20 @@ impl ProtectedRegion {
     /// protection-state transition syscall fails.
     pub fn with_read<T>(&mut self, f: impl FnOnce(&[u8]) -> T) -> Result<T, ProtectionError> {
         self.verify_canary()?;
-        let slice = unsafe { std::slice::from_raw_parts(self.data, self.usable_len) };
+        let ptr = self.data;
+        let len = self.usable_len;
+        let guard = ResealOnDrop::new(self);
+        // SAFETY: region is currently `PROT_READ`. On a closure panic, the
+        // guard re-seals best-effort during unwind. On the success path,
+        // `guard.finish()?` re-seals and surfaces `mprotect` errors.
+        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
         let result = f(slice);
-        self.mprotect_noaccess()?;
+        guard.finish()?;
         Ok(result)
     }
 
     /// Execute `f` with read-write access to the secret bytes.
-    /// Re-seals (no-access) after `f` returns.
+    /// Re-seals (no-access) after `f` returns or panics.
     ///
     /// Scoped equivalent of libsodium's
     /// `sodium_mprotect_readwrite` + `sodium_mprotect_noaccess`.
@@ -144,9 +150,15 @@ impl ProtectedRegion {
     pub fn with_write<T>(&mut self, f: impl FnOnce(&mut [u8]) -> T) -> Result<T, ProtectionError> {
         mprotect(self.data, self.data_pages_len, Protection::ReadWrite)?;
         self.protection = Protection::ReadWrite;
-        let slice = unsafe { std::slice::from_raw_parts_mut(self.data, self.usable_len) };
+        let ptr = self.data;
+        let len = self.usable_len;
+        let guard = ResealOnDrop::new(self);
+        // SAFETY: region is currently `PROT_RW`. On a closure panic, the
+        // guard re-seals best-effort during unwind. On the success path,
+        // `guard.finish()?` re-seals and surfaces any `mprotect` failure.
+        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
         let result = f(slice);
-        self.mprotect_noaccess()?;
+        guard.finish()?;
         Ok(result)
     }
 
@@ -222,6 +234,42 @@ enum Protection {
     ReadWrite,
 }
 
+/// RAII guard that re-seals the region to `PROT_NONE`.
+///
+/// Used by `with_read` / `with_write`. On the success path, callers
+/// invoke `finish()` to re-seal explicitly and propagate any `mprotect`
+/// failure as `ProtectionError::Mprotect`. The `Drop` path is reached
+/// during unwind from a closure panic, where it re-seals
+/// best-effort.
+struct ResealOnDrop<'a> {
+    region: &'a mut ProtectedRegion,
+}
+
+impl<'a> ResealOnDrop<'a> {
+    fn new(region: &'a mut ProtectedRegion) -> Self {
+        Self { region }
+    }
+
+    /// Re-seal and surface `mprotect` errors.
+    ///
+    /// # Errors
+    /// Will raise a [`ProtectionError`] if there is an `mprotect` failure.
+    fn finish(self) -> Result<(), ProtectionError> {
+        self.region.mprotect_noaccess()
+    }
+}
+
+impl Drop for ResealOnDrop<'_> {
+    /// Best-effort resealing of protected region.
+    ///
+    /// Panicking is avoided because this would only be triggered
+    /// from an unwind panic already. This could cause the process
+    /// to fully abort.
+    fn drop(&mut self) {
+        let _ = self.region.mprotect_noaccess();
+    }
+}
+
 /// Errors from protected memory operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ProtectionError {
@@ -263,6 +311,11 @@ fn mmap_anon(len: usize) -> Result<*mut u8, ProtectionError> {
     };
     if ptr == libc::MAP_FAILED {
         return Err(ProtectionError::Mmap(io::Error::last_os_error()));
+    }
+    // Linux/Android only: exclude from core dumps. No-op elsewhere.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe {
+        let _ = libc::madvise(ptr, len, libc::MADV_DONTDUMP);
     }
     Ok(ptr.cast())
 }
