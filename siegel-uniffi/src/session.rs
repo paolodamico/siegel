@@ -62,15 +62,13 @@ impl SiegelSession {
     pub fn new(len: u32) -> Result<Arc<Self>, SessionError> {
         let len_usize = usize::try_from(len).map_err(|_| SessionError::InvalidLength)?;
 
-        // Prune dropped entries and reject if the live registry is full.
-        // Done before allocating the protected region to avoid burning OS
-        // resources on a request we will refuse.
-        {
-            let mut registry = registry_lock();
-            registry.retain(|_, w| w.strong_count() > 0);
-            if registry.len() >= MAX_ACTIVE_SESSIONS {
-                return Err(SessionError::TooManyActiveSessions);
-            }
+        // Hold the lock to the registry while allocation occurs to prevent
+        // race conditions that could exceed the maximum active sessions.
+        let mut registry = registry_lock();
+        registry.retain(|_, w| w.strong_count() > 0); // Prune dropped entries
+        if registry.len() >= MAX_ACTIVE_SESSIONS {
+            // Checked before allocation to avoid wasting resources
+            return Err(SessionError::TooManyActiveSessions);
         }
 
         let empty = Siegel::<Empty>::new(len_usize)?;
@@ -82,7 +80,8 @@ impl SiegelSession {
             capacity: len,
         });
 
-        registry_lock().insert(handle_id, Arc::downgrade(&session));
+        registry.insert(handle_id, Arc::downgrade(&session));
+        drop(registry);
 
         Ok(session)
     }
