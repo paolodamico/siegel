@@ -18,15 +18,13 @@ type Registry = Mutex<HashMap<u64, Weak<SiegelSession>>>;
 /// commonly it avoids accidental use after drop.
 static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Monotonic counter that issues unique handle IDs.
-///
-/// Starts at 1 so 0 can represent the _nil_ state.
-static NEXT_HANDLE: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(1));
-
 /// Max concurrent live sessions. Bounds mlocked memory on platforms where
 /// `RLIMIT_MEMLOCK` is enforced (typically Linux server / containers).
 /// Pruned opportunistically on every `SiegelSession::new`.
 const MAX_ACTIVE_SESSIONS: usize = 1024;
+
+/// Maximum tries to get a non-collision handle. Extremely unlikely to ever occur.
+const MAX_HANDLE_ALLOC_RETRIES: u8 = 8;
 
 /// One-time secret-handling session, held by foreign code as
 /// `Arc<SiegelSession>`.
@@ -73,7 +71,7 @@ impl SiegelSession {
 
         let empty = Siegel::<Empty>::new(len_usize)?;
 
-        let handle_id = allocate_handle_id();
+        let handle_id = allocate_handle_id(&registry)?;
         let session = Arc::new(Self {
             state: Mutex::new(SessionState::Empty(empty)),
             handle_id,
@@ -91,7 +89,9 @@ impl SiegelSession {
 impl SiegelSession {
     /// Opaque identifier handle for [`siegel_fill`].
     ///
-    /// Stable for the lifetime of the session.
+    /// Drawn from the OS CSPRNG to reduce the likelihood of
+    /// accidental access by non-expected callers. It is not an infallible
+    /// security guarantee. Stable for the lifetime of the session.
     pub fn handle_id(&self) -> u64 {
         self.handle_id
     }
@@ -236,12 +236,22 @@ fn registry_lock() -> MutexGuard<'static, HashMap<u64, Weak<SiegelSession>>> {
     REGISTRY.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Return a fresh unique handle and advance the counter.
-fn allocate_handle_id() -> u64 {
-    let mut counter = NEXT_HANDLE.lock().unwrap_or_else(PoisonError::into_inner);
-    let id = *counter;
-    *counter = counter.wrapping_add(1);
-    id
+/// Generate a random handle ID.
+///
+/// - The caller must already hold the lock to the registry.
+/// - `0` is reserved.
+fn allocate_handle_id(registry: &HashMap<u64, Weak<SiegelSession>>) -> Result<u64, SessionError> {
+    for _ in 0..MAX_HANDLE_ALLOC_RETRIES {
+        let id = getrandom::u64().map_err(|e| SessionError::HandleAllocationFailed {
+            reason: e.to_string(),
+        })?;
+        if id != 0 && !registry.contains_key(&id) {
+            return Ok(id);
+        }
+    }
+    Err(SessionError::HandleAllocationFailed {
+        reason: "exhausted handle allocation retries".into(),
+    })
 }
 
 /// Acquire a session's state mutex
@@ -271,6 +281,8 @@ pub enum SessionError {
     LockFailed { reason: String },
     #[error("canary check failed: possible memory corruption")]
     CanaryCorrupted,
+    #[error("could not allocate a unique handle id: {reason}")]
+    HandleAllocationFailed { reason: String },
 }
 
 impl From<SiegelError> for SessionError {
@@ -432,6 +444,17 @@ mod tests {
         let a = SiegelSession::new(8).unwrap();
         let b = SiegelSession::new(8).unwrap();
         assert_ne!(a.handle_id(), b.handle_id());
+    }
+
+    #[test]
+    fn handles_are_not_sequential() {
+        let sessions: Vec<_> = (0..16).map(|_| SiegelSession::new(8).unwrap()).collect();
+        let ids: Vec<u64> = sessions.iter().map(|s| s.handle_id()).collect();
+        assert!(ids.iter().all(|&id| id != 0), "0 is reserved");
+        assert!(
+            ids.iter().any(|&id| id > u64::from(u32::MAX)),
+            "expected at least one handle in the high u64 range, got {ids:?}",
+        );
     }
 
     #[test]

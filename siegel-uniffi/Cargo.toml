@@ -22,6 +22,7 @@ test-utils = ["dep:sha2", "dep:libc", "siegel/test-utils"]
 siegel = { workspace = true }
 thiserror = { workspace = true }
 uniffi = { workspace = true }
+getrandom = "0.4"
 libc = { version = "0.2", optional = true } # `libc` is only used by the `test_utils`
 sha2 = { version = "0.10", optional = true }
 
