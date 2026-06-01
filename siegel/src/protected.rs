@@ -128,11 +128,14 @@ impl ProtectedRegion {
         self.verify_canary()?;
         let ptr = self.data;
         let len = self.usable_len;
-        let _reseal = ResealOnDrop(self);
-        // SAFETY: region is currently `PROT_READ`; `_reseal` returns it to
-        // `PROT_NONE` on every exit path, including a closure panic.
+        let guard = ResealOnDrop::new(self);
+        // SAFETY: region is currently `PROT_READ`. On a closure panic, the
+        // guard re-seals best-effort during unwind. On the success path,
+        // `guard.finish()?` re-seals and surfaces `mprotect` errors.
         let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-        Ok(f(slice))
+        let result = f(slice);
+        guard.finish()?;
+        Ok(result)
     }
 
     /// Execute `f` with read-write access to the secret bytes.
@@ -149,11 +152,14 @@ impl ProtectedRegion {
         self.protection = Protection::ReadWrite;
         let ptr = self.data;
         let len = self.usable_len;
-        let _reseal = ResealOnDrop(self);
-        // SAFETY: region is currently `PROT_RW`; `_reseal` returns it to
-        // `PROT_NONE` on every exit path, including a closure panic.
+        let guard = ResealOnDrop::new(self);
+        // SAFETY: region is currently `PROT_RW`. On a closure panic, the
+        // guard re-seals best-effort during unwind. On the success path,
+        // `guard.finish()?` re-seals and surfaces any `mprotect` failure.
         let slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
-        Ok(f(slice))
+        let result = f(slice);
+        guard.finish()?;
+        Ok(result)
     }
 
     /// Mark the data pages as `PROT_NONE` — no read or write.
@@ -228,17 +234,39 @@ enum Protection {
     ReadWrite,
 }
 
-/// RAII guard that re-seals the region to `PROT_NONE` when dropped.
+/// RAII guard that re-seals the region to `PROT_NONE`.
 ///
-/// Used by `with_read` / `with_write` so the scoped accessor re-seals on
-/// every exit path, including closure panics. A failing `mprotect` is
-/// swallowed because the region's own `Drop` will zeroize + munmap
-/// regardless.
-struct ResealOnDrop<'a>(&'a mut ProtectedRegion);
+/// Used by `with_read` / `with_write`. On the success path, callers
+/// invoke `finish()` to re-seal explicitly and propagate any `mprotect`
+/// failure as `ProtectionError::Mprotect`. The `Drop` path is reached
+/// during unwind from a closure panic, where it re-seals
+/// best-effort.
+struct ResealOnDrop<'a> {
+    region: &'a mut ProtectedRegion,
+}
+
+impl<'a> ResealOnDrop<'a> {
+    fn new(region: &'a mut ProtectedRegion) -> Self {
+        Self { region }
+    }
+
+    /// Re-seal and surface `mprotect` errors.
+    ///
+    /// # Errors
+    /// Will raise a [`ProtectionError`] if there is an `mprotect` failure.
+    fn finish(self) -> Result<(), ProtectionError> {
+        self.region.mprotect_noaccess()
+    }
+}
 
 impl Drop for ResealOnDrop<'_> {
+    /// Best-effort resealing of protected region.
+    ///
+    /// Panicking is avoided because this would only be triggered
+    /// from an unwind panic already. This could cause the process
+    /// to fully abort.
     fn drop(&mut self) {
-        let _ = self.0.mprotect_noaccess();
+        let _ = self.region.mprotect_noaccess();
     }
 }
 
