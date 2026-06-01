@@ -56,7 +56,7 @@ impl SiegelSession {
     ///
     /// `SessionError::InvalidLength` for `len == 0` or `len > 1 MiB`.
     /// `SessionError::TooManyActiveSessions` if the registry is at the
-    /// [`MAX_ACTIVE_SESSIONS`] cap.
+    /// `MAX_ACTIVE_SESSIONS` cap.
     /// Allocation / protection / lock errors propagate from `siegel`.
     #[uniffi::constructor]
     pub fn new(len: u32) -> Result<Arc<Self>, SessionError> {
