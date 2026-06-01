@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/paolodamico/siegel/compare/siegel-uniffi-v0.1.0...siegel-uniffi-v0.2.0) - 2026-06-01
+
+### Added
+
+- randomly allocate session handles ([#11](https://github.com/paolodamico/siegel/pull/11))
+- harden reseal-on-panic, registry cap ([#8](https://github.com/paolodamico/siegel/pull/8))
+- kotlin integration and tests ([#7](https://github.com/paolodamico/siegel/pull/7))
+- swift bindings and integration tests ([#5](https://github.com/paolodamico/siegel/pull/5))
+
+### Other
+
+- release v0.1.0 ([#2](https://github.com/paolodamico/siegel/pull/2))
+
 ## [0.1.0](https://github.com/paolodamico/siegel/releases/tag/siegel-uniffi-v0.1.0) - 2026-05-13
 
 ### Added
