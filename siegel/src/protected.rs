@@ -182,6 +182,7 @@ impl ProtectedRegion {
         let canary_ptr = unsafe { self.data.add(self.usable_len) };
         let stored = unsafe { std::slice::from_raw_parts(canary_ptr, CANARY.len()) };
         if stored != CANARY {
+            self.mprotect_noaccess()?;
             return Err(ProtectionError::CanaryCorrupted);
         }
         Ok(())
@@ -463,6 +464,7 @@ mod tests {
 
         let err = region.with_read(<[u8]>::to_vec).unwrap_err();
         assert!(matches!(err, ProtectionError::CanaryCorrupted));
+        assert_eq!(region.protection, Protection::NoAccess);
     }
 
     /// Fork a child process, have it deliberately touch a guard page, and
