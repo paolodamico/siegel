@@ -3,6 +3,7 @@
 use std::io;
 
 use sha2::{Digest, Sha256};
+use siegel::{Empty, Siegel};
 
 use crate::session::{SessionError, SiegelSession, lookup_session};
 
@@ -107,4 +108,85 @@ pub unsafe extern "C" fn unsafe_test_only_siegel_front_guard_seg_fault(handle: u
         return ERR_INVALID_HANDLE;
     };
     fork_and_run(|| unsafe { session.test_touch_front_guard() })
+}
+
+const DEGRADE_OK: i32 = 0;
+const DEGRADE_HARD_ERROR: i32 = 1;
+const DEGRADE_STILL_LOCKED: i32 = 2;
+
+/// Test-only: in a forked child, zero `RLIMIT_MEMLOCK` so the real `mlock`
+/// syscall fails, then allocate a siegel and confirm it degrades gracefully.
+/// Exercises the best-effort lock path against the *actual* platform libc.
+///
+/// # Returns
+/// - [`DEGRADE_OK`]: degraded to unlocked yet stayed usable (the expected path);
+/// - [`DEGRADE_STILL_LOCKED`]: `mlock` unexpectedly succeeded (e.g. privileged environment);
+/// - [`DEGRADE_HARD_ERROR`]: allocation failed, lock failed aborted or degraded region was unusable;
+/// - [`ERR_FORK_FAILED`] / [`ERR_WAITPID_FAILED`] on fork/wait failure.
+///
+/// Runs entirely in the child so the `RLIMIT_MEMLOCK` change never touches
+/// the host test process.
+///
+/// # Safety
+/// Runs on a forked process
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unsafe_test_only_siegel_degrades_without_mlock() -> i32 {
+    // SAFETY: single fork; no async-signal-unsafe parent state is touched.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return ERR_FORK_FAILED;
+    }
+    if pid == 0 {
+        let lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: valid rlimit pointer; lowering the soft limit is permitted
+        unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &raw const lim) };
+        let code = degrade_probe();
+        // SAFETY: _exit is async-signal-safe and skips atexit handlers.
+        unsafe { libc::_exit(code) };
+    }
+
+    let mut status: libc::c_int = 0;
+    loop {
+        // SAFETY: `pid` is a valid child we just forked.
+        let r = unsafe { libc::waitpid(pid, &raw mut status, 0) };
+        if r >= 0 {
+            break;
+        }
+        if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return ERR_WAITPID_FAILED;
+        }
+    }
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else {
+        ERR_WAITPID_FAILED
+    }
+}
+
+/// Allocate a siegel under a zeroed `RLIMIT_MEMLOCK` and classify the outcome,
+/// for the child of [`unsafe_test_only_siegel_degrades_without_mlock`].
+fn degrade_probe() -> i32 {
+    match Siegel::<Empty>::new(64) {
+        // Degraded to unlocked (best-effort) — must stay usable.
+        Ok(empty) if !empty.is_locked() => round_trip_ok(empty),
+        // mlock succeeded despite RLIMIT_MEMLOCK=0 — privileged env where the
+        // limit isn't enforced. Can't force the failure here; inconclusive.
+        Ok(_) => DEGRADE_STILL_LOCKED,
+        // A failed lock must never abort allocation.
+        Err(_) => DEGRADE_HARD_ERROR,
+    }
+}
+
+/// Confirm a (best-effort, unlocked) siegel still round-trips its secret.
+fn round_trip_ok(empty: Siegel<Empty>) -> i32 {
+    let Ok(loaded) = empty.write(&[0x5A; 64]) else {
+        return DEGRADE_HARD_ERROR;
+    };
+    match loaded.read_once(|bytes| bytes.iter().all(|&b| b == 0x5A)) {
+        Ok(true) => DEGRADE_OK,
+        _ => DEGRADE_HARD_ERROR,
+    }
 }
