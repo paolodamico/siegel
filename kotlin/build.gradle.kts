@@ -1,2 +1,4 @@
-// Top-level build file. All module config lives in :siegel-android; plugin
-// versions are pinned in settings.gradle.kts (pluginManagement).
+// Top-level build file. Module-specific config lives in each subproject.
+plugins {
+    kotlin("jvm") version "1.9.22" apply false
+}
