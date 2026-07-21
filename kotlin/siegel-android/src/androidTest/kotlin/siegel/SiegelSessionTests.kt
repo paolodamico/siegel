@@ -18,8 +18,9 @@ import uniffi.siegel_uniffi.sha256Consume
 
 /**
  * `siegel_fill` is a hand-written `extern "C"` symbol outside the UniFFI
- * scaffolding. JNA loads `libsiegel_uniffi` from `jna.library.path`
- * (configured in the test task) and calls the symbol directly.
+ * scaffolding. JNA resolves `libsiegel_uniffi.so` from the APK's native
+ * library dir (the cross-compiled `.so` packaged under `jniLibs`) and calls
+ * the symbol directly.
  *
  * C ABI: `i32 siegel_fill(u64 handle, *const u8 src, usize len)`.
  */
@@ -55,6 +56,17 @@ class SiegelSessionTests {
         val session = SiegelSession(32u)
         assertFalse(session.isConsumed())
         assertEquals(session.handleId(), session.handleId())
+    }
+
+    @Test
+    fun `consumed session reports unlocked`() {
+        // We can't assert a *fresh* session is locked: on an Android emulator
+        // mlock may be unavailable, so a live session can legitimately be
+        // unlocked (best-effort mode). A consumed session holds no memory and
+        // must always report unlocked — deterministic on every platform.
+        val session = SiegelSession(8u)
+        session.obliviate()
+        assertFalse(session.isLocked())
     }
 
     @Test
