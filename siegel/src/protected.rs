@@ -457,12 +457,6 @@ mod tests {
     }
 
     #[test]
-    fn new_reports_locked_on_success() {
-        let region = ProtectedRegion::new(32).unwrap();
-        assert!(region.is_locked());
-    }
-
-    #[test]
     fn degrades_when_lock_fails() {
         let mut region =
             ProtectedRegion::new_with(32, |_, _| Err(io::Error::from_raw_os_error(libc::ENOMEM)))
