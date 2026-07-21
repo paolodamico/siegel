@@ -18,7 +18,7 @@ Siegel particularly focuses on secrets that must cross foreign boundaries. For e
 ## Design
 
 The design focuses on making it harder to do unsafe behavior. For example, it takes the opinionated approach of secrets being one-time use so that secrets only live in application memory for the time they are actually required. In addition to this, when secrets are in memory they are:
-- `mlock`ed to prevent swapping to disk.
+- `mlock`ed to prevent swapping to disk (best-effort).
 - `mprotect`-sealed to prevent reading outside of a very explicit scope.
 - Zeroized on drop.
 - Page-aligned and protected by a canary for page overflows.
@@ -29,7 +29,7 @@ The design focuses on making it harder to do unsafe behavior. For example, it ta
 
 - ✅ Bugs within the process where memory where the secret is stored is accidentally read.
 - ✅ Stale pointer dereferences the sealed secret (`PROT_NONE` segfaults)
-- ✅ Secret swapped to disk (already not applicable on iOS).
+- ✔️ Secret swapped to disk (best effort; already not applicable on iOS).
 - ✅ UniFFI copies the secret into additional buffers for lowering/lifting which results in unzeroized copies of the secret.
 - ✅ Closure panics mid-operation. Secret is still zeroized as long as there is panic unwinding.
 - ✅ Makes accidental logging of secrets hard. Secret is only accessible within an explicit closure.
