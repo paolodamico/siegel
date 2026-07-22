@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "MIT"
-version = "0.2.0"
+version = "0.3.0"
 authors = [
     "Paolo D'Amico <5864173+paolodamico@users.noreply.github.com>",
 ]
@@ -14,7 +14,7 @@ repository = "https://github.com/paolodamico/siegel"
 [workspace.dependencies]
 uniffi = { version = "0.31.0", features = ["build"] }
 thiserror = { version = "2" }
-siegel = { version = "0.2.0", path = "siegel" }
+siegel = { version = "0.3.0", path = "siegel" }
 
 [profile.release]
 debug = false
