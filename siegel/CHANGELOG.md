@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/paolodamico/siegel/compare/siegel-v0.2.0...siegel-v0.3.0) - 2026-07-22
+
+### Added
+
+- [**breaking**] mlock best effort ([#14](https://github.com/paolodamico/siegel/pull/14))
+
+### Fixed
+
+- reseal protected region on canary failure ([#12](https://github.com/paolodamico/siegel/pull/12))
+
 ## [0.2.0](https://github.com/paolodamico/siegel/compare/siegel-v0.1.0...siegel-v0.2.0) - 2026-06-01
 
 ### Added
