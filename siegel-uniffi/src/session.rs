@@ -81,6 +81,15 @@ impl SiegelSession {
         registry.insert(handle_id, Arc::downgrade(&session));
         drop(registry);
 
+        #[cfg(feature = "tracing")]
+        if !session.is_locked() {
+            tracing::warn!(
+                target: "siegel",
+                capacity = len,
+                "siegel could not be `mlock`ed; continuing"
+            );
+        }
+
         Ok(session)
     }
 }

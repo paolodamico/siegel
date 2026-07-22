@@ -14,13 +14,10 @@ name = "siegel"
 [features]
 # Exposes unsafe helpers for tests
 test-utils = []
-# Some additional intermediate logging useful for debugging
-tracing = ["dep:tracing"]
 
 [dependencies]
 libc = "0.2"
 thiserror = { workspace = true }
-tracing = { version = "0.1", optional = true, default-features = false }
 zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

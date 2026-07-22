@@ -117,13 +117,8 @@ impl ProtectedRegion {
         // then seal before returning.
         mprotect(data, data_pages_len, Protection::ReadWrite)?;
 
-        let locked = match lock(data, data_pages_len) {
-            Ok(()) => true,
-            Err(e) => {
-                warn_degraded(&e);
-                false
-            }
-        };
+        // Best-effort `mlock`; expose result
+        let locked = lock(data, data_pages_len).is_ok();
 
         // Canary sits at `data + size`, inside the page-aligned region
         // but past the caller's usable bytes.
@@ -382,34 +377,6 @@ fn mprotect(addr: *mut u8, len: usize, prot: Protection) -> Result<(), Protectio
         return Err(ProtectionError::Mprotect(io::Error::last_os_error()));
     }
     Ok(())
-}
-
-/// Warn that a region degraded to unlocked.
-///
-/// Emits a real log only when the `tracing` feature is enabled.
-fn warn_degraded(err: &io::Error) {
-    #[cfg(feature = "tracing")]
-    {
-        let mut lim = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        // SAFETY: `getrlimit` writes into a valid, owned `rlimit`.
-        let memlock_limit = if unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &raw mut lim) } == 0 {
-            lim.rlim_cur
-        } else {
-            0
-        };
-        tracing::warn!(
-            target: "siegel",
-            os = std::env::consts::OS,
-            errno = err.raw_os_error().unwrap_or(0),
-            memlock_limit,
-            "mlock failed"
-        );
-    }
-    #[cfg(not(feature = "tracing"))]
-    let _ = err;
 }
 
 #[cfg(test)]
