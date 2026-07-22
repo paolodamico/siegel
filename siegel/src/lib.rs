@@ -104,6 +104,16 @@ impl<State> Siegel<State> {
     pub fn len(&self) -> usize {
         self.region.len()
     }
+
+    /// Whether the secret's pages are locked into RAM (`mlock`ed).
+    ///
+    /// `mlock` is best-effort (attempted everywhere, never fatal). `false`
+    /// means the lock failed at allocation (e.g. mostly unsupported on Android, where
+    /// `RLIMIT_MEMLOCK` is often too low). See [`ProtectedRegion::is_locked`].
+    #[must_use]
+    pub fn is_locked(&self) -> bool {
+        self.region.is_locked()
+    }
 }
 
 impl<State> Zeroize for Siegel<State> {
@@ -125,8 +135,6 @@ pub enum SiegelError {
     AllocationFailed { reason: String },
     #[error("memory protection failed: {reason}")]
     ProtectionFailed { reason: String },
-    #[error("memory lock failed: {reason}")]
-    LockFailed { reason: String },
     #[error("canary check failed — possible memory corruption")]
     CanaryCorrupted,
 }
@@ -139,9 +147,6 @@ impl From<ProtectionError> for SiegelError {
                 reason: e.to_string(),
             },
             ProtectionError::Mprotect(e) => Self::ProtectionFailed {
-                reason: e.to_string(),
-            },
-            ProtectionError::Mlock(e) => Self::LockFailed {
                 reason: e.to_string(),
             },
             ProtectionError::CanaryCorrupted => Self::CanaryCorrupted,

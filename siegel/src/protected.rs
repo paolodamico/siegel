@@ -29,7 +29,14 @@ const MAX_SECRET_SIZE: usize = 1024 * 1024; // currently 1Mb
 /// that is verified on every read to detect overflow corruption.
 ///
 /// - Guard pages are always `PROT_NONE`, access segfaults immediately.
-/// - Data pages are `mlock`ed so they're never swapped to disk.
+/// - Data pages are `mlock`ed (best-effort) so they aren't swapped to disk.
+///   The lock is attempted on every platform but a failure never aborts
+///   allocation. The rationale on this is that it's quite possible that some devices have
+///   a very low `RLIMIT_MEMLOCK` like some Android devices and this would crash on
+///   business-as-usual. At the same time, this is unlikely to cause actual swapping,
+///   on iOS there's no disk swap and on Android it'll start with zram first. This best-effort
+///   lock attempt follows libsodium conventions. Regardless, the lock status
+///   is repoted in [`is_locked`](Self::is_locked).
 /// - Data pages default to `PROT_NONE` (sealed). Temporarily unsealed
 ///   via `with_read` / `with_write` scoped accessors.
 /// - A canary value at the end of the data region detects overflows.
@@ -47,6 +54,9 @@ pub struct ProtectedRegion {
     usable_len: usize,
     /// Current protection level of data pages.
     protection: Protection,
+    /// Whether the data pages are `mlock`ed (pinned, swap-protected).
+    /// `false` when the best-effort lock failed at allocation.
+    locked: bool,
 }
 
 // SAFETY: ProtectedRegion owns its mmap region and never shares the raw
@@ -65,8 +75,31 @@ impl ProtectedRegion {
     /// # Errors
     ///
     /// `ProtectionError::InvalidSize` for `size == 0` or `size > 1 MiB`.
-    /// `Mmap` / `Mprotect` / `Mlock` if the underlying syscalls fail.
+    /// `Mmap` / `Mprotect` if the underlying syscalls fail. A failed `mlock`
+    /// never errors — it degrades to best-effort (see
+    /// [`is_locked`](Self::is_locked)).
     pub fn new(size: usize) -> Result<Self, ProtectionError> {
+        Self::new_with(size, |ptr, len| {
+            // SAFETY: `ptr`/`len` describe the freshly-mapped, page-aligned
+            // data region; `mlock` only pins those pages.
+            if unsafe { libc::mlock(ptr.cast(), len) } != 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    /// Allocate, applying `lock` to pin the data pages (best-effort).
+    ///
+    /// Split out from [`new`](Self::new) so tests can inject a lock outcome
+    /// deterministically without perturbing the process-wide
+    /// `RLIMIT_MEMLOCK`. A failed `lock` is never fatal: the region is
+    /// returned with `locked = false` and a `warn` is emitted.
+    fn new_with(
+        size: usize,
+        lock: impl FnOnce(*mut u8, usize) -> io::Result<()>,
+    ) -> Result<Self, ProtectionError> {
         if size == 0 || size > MAX_SECRET_SIZE {
             return Err(ProtectionError::InvalidSize);
         }
@@ -80,14 +113,12 @@ impl ProtectedRegion {
         let base = mmap_anon(total_len)?;
         let data = unsafe { base.add(page_size) };
 
-        // Open the data pages briefly to mlock them and write the canary,
+        // Open the data pages briefly to lock them and write the canary,
         // then seal before returning.
         mprotect(data, data_pages_len, Protection::ReadWrite)?;
 
-        if unsafe { libc::mlock(data.cast(), data_pages_len) } != 0 {
-            unsafe { libc::munmap(base.cast(), total_len) };
-            return Err(ProtectionError::Mlock(io::Error::last_os_error()));
-        }
+        // Best-effort `mlock`; expose result
+        let locked = lock(data, data_pages_len).is_ok();
 
         // Canary sits at `data + size`, inside the page-aligned region
         // but past the caller's usable bytes.
@@ -104,6 +135,7 @@ impl ProtectedRegion {
             data_pages_len,
             usable_len: size,
             protection: Protection::NoAccess,
+            locked,
         })
     }
 
@@ -112,6 +144,18 @@ impl ProtectedRegion {
     #[expect(clippy::len_without_is_empty, reason = "regions are always non-empty")]
     pub fn len(&self) -> usize {
         self.usable_len
+    }
+
+    /// Whether the data pages are locked into RAM (`mlock`ed).
+    ///
+    /// `mlock` is best-effort: attempted on every platform, never fatal.
+    /// `false` means the lock failed at allocation.
+    ///
+    /// # Notes
+    /// - On iOS, there's no disk swap.
+    #[must_use]
+    pub fn is_locked(&self) -> bool {
+        self.locked
     }
 
     /// Execute `f` with read-only access to the secret bytes.
@@ -208,7 +252,9 @@ impl Drop for ProtectedRegion {
     fn drop(&mut self) {
         self.zeroize();
         unsafe {
-            libc::munlock(self.data.cast(), self.data_pages_len);
+            if self.locked {
+                libc::munlock(self.data.cast(), self.data_pages_len);
+            }
             libc::munmap(self.base.cast(), self.total_len);
         }
     }
@@ -280,8 +326,6 @@ pub enum ProtectionError {
     Mmap(io::Error),
     #[error("mprotect failed: {0}")]
     Mprotect(io::Error),
-    #[error("mlock failed: {0}")]
-    Mlock(io::Error),
     #[error("canary corrupted. potential buffer overflow")]
     CanaryCorrupted,
 }
@@ -377,6 +421,63 @@ mod tests {
     #[test]
     fn oversized_rejected() {
         assert!(ProtectedRegion::new(MAX_SECRET_SIZE + 1).is_err());
+    }
+
+    #[test]
+    fn degrades_when_lock_fails() {
+        let mut region =
+            ProtectedRegion::new_with(32, |_, _| Err(io::Error::from_raw_os_error(libc::ENOMEM)))
+                .unwrap();
+        assert!(!region.is_locked());
+        region
+            .with_write(|buf| buf.copy_from_slice(&[0x9A; 32]))
+            .unwrap();
+        assert_eq!(region.with_read(<[u8]>::to_vec).unwrap(), vec![0x9A; 32]);
+    }
+
+    #[test]
+    fn reports_locked_when_lock_succeeds() {
+        let region = ProtectedRegion::new_with(16, |_, _| Ok(())).unwrap();
+        assert!(region.is_locked());
+    }
+
+    /// Force a *real* `mlock` failure by zeroing `RLIMIT_MEMLOCK` in a forked process.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn real_mlock_failure_degrades() {
+        // SAFETY: geteuid is always safe.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        // SAFETY: single fork on a test thread; the child touches only
+        // setrlimit, the allocator under test, and _exit.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            let lim = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+
+            // SAFETY: valid rlimit pointer; lowering the soft limit is allowed
+            // for unprivileged processes.
+            unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &raw const lim) };
+            // Best-effort: allocation must still succeed, reporting unlocked.
+            let code = match ProtectedRegion::new(4096) {
+                Ok(region) if !region.is_locked() => 0,
+                _ => 1,
+            };
+            // SAFETY: _exit is async-signal-safe and skips atexit handlers.
+            unsafe { libc::_exit(code) };
+        }
+
+        let mut status: libc::c_int = 0;
+        // SAFETY: `pid` is a valid child we just forked.
+        let waited = unsafe { libc::waitpid(pid, &raw mut status, 0) };
+        assert_eq!(waited, pid, "waitpid did not return our child");
+        assert!(libc::WIFEXITED(status), "child did not exit normally");
+        assert_eq!(libc::WEXITSTATUS(status), 0, "expected best-effort degrade");
     }
 
     #[test]

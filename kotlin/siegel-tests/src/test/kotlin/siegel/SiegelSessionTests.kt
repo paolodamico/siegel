@@ -58,6 +58,16 @@ class SiegelSessionTests {
     }
 
     @Test
+    fun `consumed session reports unlocked`() {
+        // `isLocked()` is best-effort: a live session may be locked or not
+        // depending on the platform's mlock support. A consumed session holds
+        // no memory and must always report unlocked — deterministic anywhere.
+        val session = SiegelSession(8u)
+        session.obliviate()
+        assertFalse(session.isLocked())
+    }
+
+    @Test
     fun `zero length is rejected`() {
         assertFailsWith<SessionException.InvalidLength> { SiegelSession(0u) }
     }

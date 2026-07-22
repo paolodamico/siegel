@@ -81,6 +81,15 @@ impl SiegelSession {
         registry.insert(handle_id, Arc::downgrade(&session));
         drop(registry);
 
+        #[cfg(feature = "tracing")]
+        if !session.is_locked() {
+            tracing::warn!(
+                target: "siegel",
+                capacity = len,
+                "siegel could not be `mlock`ed; continuing"
+            );
+        }
+
         Ok(session)
     }
 }
@@ -117,6 +126,15 @@ impl SiegelSession {
     /// a terminal error state.
     pub fn is_consumed(&self) -> bool {
         matches!(*lock_state(&self.state), SessionState::Consumed)
+    }
+
+    /// Whether the secret's pages are locked in RAM (`mlock`ed).
+    pub fn is_locked(&self) -> bool {
+        match &*lock_state(&self.state) {
+            SessionState::Empty(s) => s.is_locked(),
+            SessionState::Loaded(s) => s.is_locked(),
+            SessionState::Consumed => false,
+        }
     }
 }
 
@@ -277,8 +295,6 @@ pub enum SessionError {
     AllocationFailed { reason: String },
     #[error("memory protection failed: {reason}")]
     ProtectionFailed { reason: String },
-    #[error("memory lock failed: {reason}")]
-    LockFailed { reason: String },
     #[error("canary check failed: possible memory corruption")]
     CanaryCorrupted,
     #[error("could not allocate a unique handle id: {reason}")]
@@ -292,7 +308,6 @@ impl From<SiegelError> for SessionError {
             SiegelError::LengthMismatch { .. } => Self::LengthMismatch,
             SiegelError::AllocationFailed { reason } => Self::AllocationFailed { reason },
             SiegelError::ProtectionFailed { reason } => Self::ProtectionFailed { reason },
-            SiegelError::LockFailed { reason } => Self::LockFailed { reason },
             SiegelError::CanaryCorrupted => Self::CanaryCorrupted,
         }
     }
