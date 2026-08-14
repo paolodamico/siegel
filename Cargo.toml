@@ -12,7 +12,7 @@ authors = [
 repository = "https://github.com/paolodamico/siegel"
 
 [workspace.dependencies]
-uniffi = { version = "0.31.0", features = ["build"] }
+uniffi = { version = "0.32", features = ["build"] }
 thiserror = { version = "2" }
 siegel = { version = "0.3.0", path = "siegel" }
 
