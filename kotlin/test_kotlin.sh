@@ -10,8 +10,8 @@ BASE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BINDING="${1:-uniffi}"
 case "$BINDING" in
-    uniffi)  MODULE="siegel-tests";         BUILD_SCRIPT="build_kotlin.sh" ;;
-    boltffi) MODULE="siegel-boltffi-tests"; BUILD_SCRIPT="build_boltffi_kotlin.sh" ;;
+    uniffi)  MODULE="siegel-tests";         BUILD_SCRIPT="build_kotlin.sh";         BUILD_ARGS=() ;;
+    boltffi) MODULE="siegel-boltffi-tests"; BUILD_SCRIPT="build_boltffi_kotlin.sh"; BUILD_ARGS=(--test-utils) ;;
     *) echo "Unknown binding '$BINDING' (expected: uniffi, boltffi)" >&2; exit 1 ;;
 esac
 
@@ -60,7 +60,7 @@ if [ -z "${JAVA_HOME:-}" ]; then
 fi
 
 echo "Step 1: building host cdylib + Kotlin bindings ($BINDING)"
-bash "$BASE_PATH/$BUILD_SCRIPT"
+bash "$BASE_PATH/$BUILD_SCRIPT" "${BUILD_ARGS[@]}"
 
 cd "$BASE_PATH"
 
@@ -77,7 +77,7 @@ if [ ! -f "gradlew" ]; then
     DIST_URL="https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
     TMP="$(mktemp -d)"
     trap 'rm -rf "$TMP"' EXIT
-    curl --fail -sSL "$DIST_URL" -o "$TMP/gradle.zip"
+    curl --fail -sSL --retry 3 --retry-all-errors --max-time 300 "$DIST_URL" -o "$TMP/gradle.zip"
 
     if command -v sha256sum >/dev/null 2>&1; then
         actual_sha="$(sha256sum "$TMP/gradle.zip" | awk '{print $1}')"

@@ -16,8 +16,21 @@ TEST_MODULE="$KOTLIN_DIR/siegel-boltffi-tests"
 # same source set without extra Gradle wiring.
 GENERATED_DIR="$TEST_MODULE/src/main/kotlin/generated"
 
-# `jvm` provides the JNI fill path; required on Android, opt-in on desktop.
-FEATURES="test-utils,jvm"
+# Test-only helpers are OFF by default. They export `sha256_consume` and
+# `unsafe_test_only_siegel_front_guard_bolt`
+TEST_UTILS=0
+for arg in "$@"; do
+    case "$arg" in
+        --test-utils) TEST_UTILS=1 ;;
+        --help|-h) sed -n '2,12p' "$0"; exit 0 ;;
+        *) echo "Unknown argument: $arg" >&2; exit 1 ;;
+    esac
+done
+
+FEATURES="jvm"
+if [ "$TEST_UTILS" = "1" ]; then
+    FEATURES="$FEATURES,test-utils"
+fi
 
 command -v boltffi >/dev/null 2>&1 || {
     echo "boltffi CLI not found. Install with: cargo install boltffi_cli --locked" >&2
@@ -38,6 +51,15 @@ esac
 
 rm -rf "$LIBS_DIR" "$GENERATED_DIR"
 mkdir -p "$LIBS_DIR" "$GENERATED_DIR"
+
+# Ensure the CLI is using the same version as the dependency
+PINNED="$(sed -n 's/^boltffi = "=\(.*\)"$/\1/p' "$CRATE_DIR/Cargo.toml" | head -1)"
+INSTALLED="$(boltffi --version | awk '{print $NF}')"
+if [ -n "$PINNED" ] && [ "$INSTALLED" != "$PINNED" ]; then
+    echo "boltffi CLI is $INSTALLED but siegel-boltffi pins boltffi $PINNED." >&2
+    echo "Install the matching CLI: cargo install boltffi_cli --version $PINNED --locked" >&2
+    exit 1
+fi
 
 cd "$PROJECT_ROOT"
 
