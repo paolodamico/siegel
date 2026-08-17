@@ -12,6 +12,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # IMPORTANT to keep in sync with the boltffi dependency in siegel-boltffi/Cargo.toml.
+  BOLTFFI_VERSION: "0.29.3"
 
 permissions:
   contents: read
@@ -36,10 +38,21 @@ jobs:
           components: clippy,rustfmt
 
       - name: Check code formatting
-        run: cargo fmt -- --check
+        run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+
+      # The CLI used here MUST match the boltffi version in the repo
+      - name: Assert boltffi crate matches the pinned CLI version
+        run: |
+          resolved="$(cargo metadata --format-version 1 \
+            | jq -r '[.packages[] | select(.name=="boltffi") | .version] | join(",")')"
+          if [ "$resolved" != "$BOLTFFI_VERSION" ]; then
+            echo "::error::boltffi crate resolved to '$resolved' but BOLTFFI_VERSION is '$BOLTFFI_VERSION'." >&2
+            exit 1
+          fi
+          echo "boltffi crate and CLI both pinned at $resolved"
 
   test:
     name: Tests
@@ -52,7 +65,7 @@ jobs:
         rust:
           - stable
           - nightly
-          - 1.80.0 # MSRV
+          - 1.85.0 # MSRV
 
     steps:
       - name: Checkout code
@@ -67,17 +80,39 @@ jobs:
 
       - name: Run tests
         run: |
-          cargo test
+          cargo test --workspace --all-features
 
-      - name: Build non-default features
+      - name: Build with default features
         run: |
-          cargo build
+          cargo build --workspace
 
-  swift-test:
-    name: Test Swift Bindings
-    runs-on: macos-14
+  bindings:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+
+    strategy:
+      # One binding breaking shouldn't hide the state of the other three.
+      fail-fast: false
+      matrix:
+        include:
+          - name: Test UniFFI Kotlin Bindings
+            os: ubuntu-latest
+            lang: kotlin
+            binding: uniffi
+          - name: Test BoltFFI Kotlin Bindings
+            os: ubuntu-latest
+            lang: kotlin
+            binding: boltffi
+          - name: Test UniFFI Swift Bindings
+            os: macos-14
+            lang: swift
+            binding: uniffi
+          - name: Test BoltFFI Swift Bindings
+            os: macos-14
+            lang: swift
+            binding: boltffi
 
     steps:
       - name: Checkout code
@@ -86,51 +121,37 @@ jobs:
           persist-credentials: false
 
       - name: Select Xcode 16.2
+        if: matrix.lang == 'swift'
         uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0 (https://github.com/maxim-lobanov/setup-xcode/releases/tag/v1.7.0)
         with:
           xcode-version: "16.2"
 
-      - name: Set up Rust with iOS Simulator target
-        # macos-14 runners are Apple Silicon, so the iOS simulator is
-        # arm64. The device + Intel-sim slices aren't needed for tests;
-        # `test_swift.sh` passes `--sim-only` to `build_swift.sh`.
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch HEAD as of 2026-05-20 (https://github.com/dtolnay/rust-toolchain/tree/stable)
-        with:
-          toolchain: stable
-          targets: aarch64-apple-ios-sim
-
-      - name: Build and run Swift integration tests
-        env:
-          VERBOSE: 1
-        run: ./swift/test_swift.sh
-
-  kotlin-test:
-    name: Test Kotlin Bindings
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2 (https://github.com/actions/checkout/releases/tag/v6.0.2)
-        with:
-          persist-credentials: false
-
       - name: Set up JDK 17
+        if: matrix.lang == 'kotlin'
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0 (https://github.com/actions/setup-java/releases/tag/v4.8.0)
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Rust
+        # macos-14 runners are Apple Silicon, so tests only need the arm64
+        # simulator slice; the build scripts pass the sim-only flag/overlay.
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch HEAD as of 2026-05-20 (https://github.com/dtolnay/rust-toolchain/tree/stable)
         with:
           toolchain: stable
+          targets: ${{ matrix.lang == 'swift' && 'aarch64-apple-ios-sim' || '' }}
 
-      - name: Build and run Kotlin integration tests
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 (https://github.com/Swatinem/rust-cache/releases/tag/v2.9.2)
+
+      - name: Install boltffi CLI
+        if: matrix.binding == 'boltffi'
+        run: cargo install boltffi_cli --version "$BOLTFFI_VERSION" --locked
+
+      - name: Build and run integration tests
         env:
           VERBOSE: 1
-        run: ./kotlin/test_kotlin.sh
+        run: ./${{ matrix.lang }}/test_${{ matrix.lang }}.sh ${{ matrix.binding }}
 
   deny:
     name: Cargo deny
@@ -171,6 +192,9 @@ jobs:
         with:
           toolchain: nightly
       - uses: dtolnay/install@982daea0f5d846abc3c83e01a6a1d73c040047c1 # cargo-docs-rs branch HEAD as of 2026-05-20 (https://github.com/dtolnay/install/tree/cargo-docs-rs)
+      # `docs-rs` honours [package.metadata.docs.rs], so `siegel` is documented
+      # with the `session` feature its dependants and READMEs reference.
       - run: |
           cargo +nightly docs-rs -p siegel
           cargo +nightly docs-rs -p siegel-uniffi
+          cargo +nightly docs-rs -p siegel-boltffi
