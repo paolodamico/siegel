@@ -42,8 +42,12 @@ public object SiegelNative {
  */
 public fun ByteBuffer.wipe() {
     require(isDirect) { "wipe() is only meaningful on a direct ByteBuffer" }
-    val zeros = ByteArray(capacity())
-    duplicate().apply { clear() }.put(zeros)
+    // Overwrite in place: allocating here could fail under memory pressure and
+    // leave the secret resident.
+    val view = duplicate().apply { clear() }
+    while (view.hasRemaining()) {
+        view.put(0)
+    }
 }
 
 /**

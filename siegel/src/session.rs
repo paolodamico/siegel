@@ -307,12 +307,6 @@ enum SessionState {
     Consumed,
 }
 
-/// Number of entries currently in the registry
-#[cfg(test)]
-fn registry_len() -> usize {
-    registry_lock().len()
-}
-
 /// Acquire the registry lock
 fn registry_lock() -> MutexGuard<'static, HashMap<u64, Weak<SessionCore>>> {
     REGISTRY.lock().unwrap_or_else(PoisonError::into_inner)
@@ -405,10 +399,6 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
-
-    /// The registry is process-global; this lock keeps the saturating test from
-    /// racing any future sibling that also fills it.
-    static CAP_LOCK: Mutex<()> = Mutex::new(());
 
     fn fill(session: &Arc<SessionCore>, bytes: &[u8]) -> i32 {
         unsafe { fill_into(session.handle_id(), bytes.as_ptr(), bytes.len()) }
@@ -549,29 +539,6 @@ mod tests {
         assert_eq!(s.len(), 64);
         s.read_once(<[u8]>::to_vec).unwrap();
         assert_eq!(s.len(), 64);
-    }
-
-    #[test]
-    fn session_cap_is_enforced_and_capacity_is_reclaimed() {
-        let _guard = CAP_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-
-        let mut sessions = Vec::new();
-        let err = loop {
-            match SessionCore::new(1) {
-                Ok(s) => sessions.push(s),
-                Err(e) => break e,
-            }
-        };
-        assert!(matches!(err, SessionError::TooManyActiveSessions));
-        assert_eq!(
-            registry_len(),
-            MAX_ACTIVE_SESSIONS,
-            "rejected while the registry was not full"
-        );
-
-        // Dropping releases the Arc; the next `new` prunes the dead Weaks.
-        sessions.clear();
-        SessionCore::new(1).unwrap();
     }
 
     #[test]

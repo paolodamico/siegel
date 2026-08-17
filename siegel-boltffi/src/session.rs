@@ -110,7 +110,7 @@ impl SiegelSession {
 ///
 /// # Rationale
 /// `BoltFFI` has special treatment for `&[u8]` lifted on Swift as `Data` (`ByteArray`) on Kotlin,
-/// this happens through a `writeBytes` function which creates a dandling copy (one more in `finalize`),
+/// this happens through a `writeBytes` function which creates a dangling copy (one more in `finalize`),
 /// i.e. dangling non-zeroized copies, what we want to avoid. We could go around this, e.g. using `i8`, but
 /// there's no guarantee this inner behavior won't change and we can't rely on that for security.
 ///

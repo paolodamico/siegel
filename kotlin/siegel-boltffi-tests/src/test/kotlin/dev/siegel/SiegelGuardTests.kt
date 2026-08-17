@@ -19,11 +19,12 @@ internal object SiegelTestNative {
     external fun frontGuardSegFault(handle: Long): Int
 }
 
-// POSIX signal numbers. Linux and macOS both use these values for SIGSEGV.
-// SIGBUS differs (10 on macOS, 7 on Linux).
+// SIGSEGV is 11 on both hosts; SIGBUS differs, and the other host's value is a
+// live signal here (10 is SIGUSR1 on Linux, 7 is SIGEMT on Darwin), so accepting
+// both would let an unrelated termination pass.
 private const val SIGSEGV: Int = 11
-private const val SIGBUS_LINUX: Int = 7
-private const val SIGBUS_DARWIN: Int = 10
+private val SIGBUS: Int =
+    if (System.getProperty("os.name").orEmpty().startsWith("Mac")) 10 else 7
 
 class SiegelGuardTests {
 
@@ -32,8 +33,8 @@ class SiegelGuardTests {
         val session = SiegelSession(64u)
         val signal = SiegelTestNative.frontGuardSegFault(session.handleId().toLong())
         assertTrue(
-            signal == SIGSEGV || signal == SIGBUS_LINUX || signal == SIGBUS_DARWIN,
-            "expected SIGSEGV ($SIGSEGV) or SIGBUS ($SIGBUS_LINUX/$SIGBUS_DARWIN), got $signal",
+            signal == SIGSEGV || signal == SIGBUS,
+            "expected SIGSEGV ($SIGSEGV) or SIGBUS ($SIGBUS), got $signal",
         )
     }
 }
