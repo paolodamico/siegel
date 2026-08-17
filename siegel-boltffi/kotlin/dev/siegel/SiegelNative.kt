@@ -75,19 +75,33 @@ public inline fun <T> withDirectSecretBuffer(size: Int, block: (ByteBuffer) -> T
  * check(rc == SiegelNative.FILL_OK)
  * ```
  *
- * @throws IllegalArgumentException if [write] did not write exactly [size] bytes.
+ * [write] must fill the buffer sequentially from index 0, and must not call
+ * `position()`, `limit()`, or `slice()`. [SiegelNative.fillDirect] always reads
+ * the first [size] bytes of the allocation, so that is where the secret has to
+ * be.
+ *
+ * The check verifies the byte *count* (the position advanced to [size]). It
+ * cannot verify *placement*. Nothing observable distinguishes "wrote a zero byte" from "wrote
+ * nothing", so this guards the plausible mistakes rather than correctness.
+ *
+ * @throws IllegalArgumentException if [write] did not advance the position to
+ *   exactly [size].
  */
 public fun fillSession(session: SiegelSession, size: Int, write: (ByteBuffer) -> Unit): Int =
     withDirectSecretBuffer(size) { buffer ->
         write(buffer)
         require(buffer.position() == size) {
-            "expected $size bytes written from index 0, but position is ${buffer.position()}"
+            "expected $size bytes written, but the buffer's position is ${buffer.position()}"
         }
         SiegelNative.fillDirect(session.handleId().toLong(), buffer, size)
     }
 
 /**
  * Runs [block] with a fresh session of [size] bytes and closes it afterwards.
+ *
+ * **Not thread-safe.** `BoltFFI` hands the JVM a raw `Box` pointer with no
+ * reference counting, so closing a session while another thread is inside
+ * any of its methods is a use-after-free. Confine a session to one thread.
  *
  * **Use this, or `SiegelSession(...).use { }`, rather than constructing a
  * session and letting it go out of scope.** The generated [SiegelSession] is
