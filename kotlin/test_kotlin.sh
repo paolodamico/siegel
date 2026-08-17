@@ -10,8 +10,8 @@ BASE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BINDING="${1:-uniffi}"
 case "$BINDING" in
-    uniffi)  MODULE="siegel-tests";         BUILD_SCRIPT="build_kotlin.sh";         BUILD_ARGS=() ;;
-    boltffi) MODULE="siegel-boltffi-tests"; BUILD_SCRIPT="build_boltffi_kotlin.sh"; BUILD_ARGS=(--test-utils) ;;
+    uniffi)  MODULE="siegel-tests";         BUILD_SCRIPT="build_kotlin.sh";         BUILD_FLAG="" ;;
+    boltffi) MODULE="siegel-boltffi-tests"; BUILD_SCRIPT="build_boltffi_kotlin.sh"; BUILD_FLAG="--test-utils" ;;
     *) echo "Unknown binding '$BINDING' (expected: uniffi, boltffi)" >&2; exit 1 ;;
 esac
 
@@ -60,7 +60,11 @@ if [ -z "${JAVA_HOME:-}" ]; then
 fi
 
 echo "Step 1: building host cdylib + Kotlin bindings ($BINDING)"
-bash "$BASE_PATH/$BUILD_SCRIPT" ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}
+if [ -n "$BUILD_FLAG" ]; then
+    bash "$BASE_PATH/$BUILD_SCRIPT" "$BUILD_FLAG"
+else
+    bash "$BASE_PATH/$BUILD_SCRIPT"
+fi
 
 cd "$BASE_PATH"
 

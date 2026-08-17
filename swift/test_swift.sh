@@ -21,7 +21,7 @@ case "$BINDING" in
         # UniFFI's generated Swift lives next to the framework; copy it into
         # the test package's source set.
         COPY_SOURCES=1
-        BUILD_ARGS=()
+        BUILD_FLAG=""
         ;;
     boltffi)
         TESTS_PATH="$BASE_PATH/boltffi-tests"
@@ -33,7 +33,7 @@ case "$BINDING" in
         # generated sources and the framework are copied in below rather than
         # referenced across the repo.
         COPY_SOURCES=2
-        BUILD_ARGS=(--test-utils)
+        BUILD_FLAG="--test-utils"
         ;;
     *) echo "Unknown binding '$BINDING' (expected: uniffi, boltffi)" >&2; exit 1 ;;
 esac
@@ -53,8 +53,13 @@ if ! xcodebuild -showsdks | grep -q 'iphonesimulator'; then
 fi
 
 echo "Step 1: building Swift bindings ($BINDING, sim-only — tests don't need device/Intel slices)"
-# Guarded expansion: bash 3.2 (macOS) errors on an empty array under `set -u`.
-bash "$BASE_PATH/$BUILD_SCRIPT" --sim-only ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}
+# Branch rather than expand an array: macOS ships bash 3.2, where expanding an
+# empty array under `set -u` is an error.
+if [ -n "$BUILD_FLAG" ]; then
+    bash "$BASE_PATH/$BUILD_SCRIPT" --sim-only "$BUILD_FLAG"
+else
+    bash "$BASE_PATH/$BUILD_SCRIPT" --sim-only
+fi
 [ -d "$XCFRAMEWORK" ] || { echo "Missing XCFramework at $XCFRAMEWORK" >&2; exit 1; }
 
 case "$COPY_SOURCES" in
