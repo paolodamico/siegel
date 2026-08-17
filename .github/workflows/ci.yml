@@ -44,6 +44,8 @@ jobs:
       # The CLI used here MUST match the boltffi version in the repo
       - name: Assert a single boltffi version resolves
         run: |
+          # `cargo pkgid` requires a resolved graph
+          cargo metadata --format-version 1 >/dev/null
           if ! cargo pkgid boltffi >/dev/null 2>&1; then
             echo "::error::cargo could not resolve a unique boltffi version" >&2
             cargo tree -p siegel-boltffi -i boltffi 2>&1 | head -20 >&2
@@ -143,6 +145,7 @@ jobs:
       - name: Install boltffi CLI matching the resolved crate
         if: matrix.binding == 'boltffi'
         run: |
+          cargo metadata --format-version 1 >/dev/null
           version="$(cargo pkgid boltffi | sed 's/.*[@#]//')"
           echo "installing boltffi_cli $version"
           cargo install boltffi_cli --version "$version" --locked

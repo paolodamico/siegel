@@ -53,6 +53,7 @@ rm -rf "$LIBS_DIR" "$GENERATED_DIR"
 mkdir -p "$LIBS_DIR" "$GENERATED_DIR"
 
 # Ensure the CLI is using the same version as the dependency
+cargo metadata --format-version 1 >/dev/null
 RESOLVED="$(cargo pkgid boltffi 2>/dev/null | sed 's/.*[@#]//')"
 INSTALLED="$(boltffi --version | awk '{print $NF}')"
 if [ -n "$RESOLVED" ] && [ "$INSTALLED" != "$RESOLVED" ]; then
