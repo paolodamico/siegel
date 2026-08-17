@@ -27,10 +27,7 @@ static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Mutex::new(HashMap::new()
 ///
 /// The cap is per-process and shared by every consumer of this module: a
 /// process embedding a binding crate *and* calling [`SessionCore`] directly
-/// draws from one budget. Each binding crate links its own copy of this module
-/// with its own registry, so loading two binding cdylibs gives two independent
-/// caps (and two independent registries — see the fill entry points, which are
-/// named per-crate precisely so they cannot interpose on each other).
+/// draws from one budget.
 pub const MAX_ACTIVE_SESSIONS: usize = 1024;
 
 /// Maximum tries to get a non-collision handle. Extremely unlikely to ever occur.
@@ -140,6 +137,14 @@ impl SessionCore {
         matches!(*lock_state(&self.state), SessionState::Consumed)
     }
 
+    /// Whether the session is still empty and therefore fillable.
+    ///
+    /// Advisory only: the state can change before the caller acts on it.
+    #[must_use]
+    pub fn is_fillable(&self) -> bool {
+        matches!(*lock_state(&self.state), SessionState::Empty(_))
+    }
+
     /// Whether the secret's pages are locked in RAM (`mlock`ed).
     #[must_use]
     pub fn is_locked(&self) -> bool {
@@ -184,6 +189,12 @@ impl SessionCore {
             }
             Err(e) => {
                 // Siegel::write consumed `empty` on failure. State stays Consumed.
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    target: "siegel",
+                    error = %e,
+                    "sealing the secret failed; session is unusable"
+                );
                 Err(SessionError::from(e))
             }
         }
@@ -213,7 +224,12 @@ impl SessionCore {
             }
         };
 
-        loaded.read_once(f).map_err(SessionError::from)
+        let result = loaded.read_once(f);
+        #[cfg(feature = "tracing")]
+        if let Err(e) = &result {
+            tracing::warn!(target: "siegel", error = %e, "reading the secret failed");
+        }
+        result.map_err(SessionError::from)
     }
 }
 
@@ -260,6 +276,10 @@ pub unsafe fn fill_into(handle: u64, src: *const u8, len: usize) -> i32 {
         return FILL_ERR_INVALID_HANDLE;
     };
 
+    if !session.is_fillable() {
+        return FILL_ERR_WRONG_STATE;
+    }
+
     if session.len() as usize != len {
         return FILL_ERR_LEN_MISMATCH;
     }
@@ -285,6 +305,12 @@ enum SessionState {
     Empty(Siegel<Empty>),
     Loaded(Siegel<Loaded>),
     Consumed,
+}
+
+/// Number of entries currently in the registry
+#[cfg(test)]
+fn registry_len() -> usize {
+    registry_lock().len()
 }
 
 /// Acquire the registry lock
@@ -379,6 +405,10 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
+
+    /// The registry is process-global; this lock keeps the saturating test from
+    /// racing any future sibling that also fills it.
+    static CAP_LOCK: Mutex<()> = Mutex::new(());
 
     fn fill(session: &Arc<SessionCore>, bytes: &[u8]) -> i32 {
         unsafe { fill_into(session.handle_id(), bytes.as_ptr(), bytes.len()) }
@@ -521,20 +551,37 @@ mod tests {
         assert_eq!(s.len(), 64);
     }
 
-    /// Sessions dropped on the foreign side should not pin the registry
-    /// forever. The opportunistic prune in `new` makes capacity available
-    /// again for subsequent allocations.
     #[test]
-    fn registry_prunes_dropped_sessions() {
-        let handle = {
-            let s = SessionCore::new(8).unwrap();
-            s.handle_id()
+    fn session_cap_is_enforced_and_capacity_is_reclaimed() {
+        let _guard = CAP_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+
+        let mut sessions = Vec::new();
+        let err = loop {
+            match SessionCore::new(1) {
+                Ok(s) => sessions.push(s),
+                Err(e) => break e,
+            }
         };
-        // After the Arc is dropped, the registry entry's Weak has 0 strong
-        // refs; the next `new` should prune it.
-        let _next = SessionCore::new(8).unwrap();
-        let rc = unsafe { fill_into(handle, [0u8; 8].as_ptr(), 8) };
-        assert_eq!(rc, FILL_ERR_INVALID_HANDLE);
+        assert!(matches!(err, SessionError::TooManyActiveSessions));
+        assert_eq!(
+            registry_len(),
+            MAX_ACTIVE_SESSIONS,
+            "rejected while the registry was not full"
+        );
+
+        // Dropping releases the Arc; the next `new` prunes the dead Weaks.
+        sessions.clear();
+        SessionCore::new(1).unwrap();
+    }
+
+    #[test]
+    fn wrong_state_outranks_length_mismatch() {
+        let s = SessionCore::new(8).unwrap();
+        assert_eq!(fill(&s, &[1u8; 8]), FILL_OK);
+        s.read_once(<[u8]>::to_vec).unwrap();
+        // Consumed *and* the wrong length: the state must win.
+        let rc = unsafe { fill_into(s.handle_id(), [0u8; 4].as_ptr(), 4) };
+        assert_eq!(rc, FILL_ERR_WRONG_STATE);
     }
 
     #[test]

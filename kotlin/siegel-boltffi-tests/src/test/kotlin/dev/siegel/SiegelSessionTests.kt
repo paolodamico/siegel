@@ -234,6 +234,44 @@ class SiegelSessionTests {
     }
 
     @Test
+    fun `fillSession rejects a flipped buffer`() {
+        // The idiomatic NIO habit: put() then flip() leaves position at 0, so
+        // the byte-count check must reject it rather than fill from a buffer
+        // whose cursor says nothing was written.
+        val session = SiegelSession(16u)
+        assertFailsWith<IllegalArgumentException> {
+            fillSession(session, 16) { buffer ->
+                buffer.put(bytesOf(0x11, 16))
+                buffer.flip()
+            }
+        }
+        assertFalse(session.isConsumed())
+    }
+
+    /**
+     * Documents a known limitation rather than a guarantee: `fillSession`
+     * verifies how many bytes were written, not where. A callback that
+     * repositions and then writes the right count passes the check and loads
+     * shifted data. Pinned here so the gap is visible
+     */
+    @Test
+    fun `fillSession does not detect a repositioned write`() {
+        val session = SiegelSession(8u)
+        val rc = fillSession(session, 8) { buffer ->
+            buffer.position(1)
+            buffer.put(bytesOf(0x33, 7)) // ends at position 8 — check passes
+        }
+        assertEquals(SiegelNative.FILL_OK, rc)
+        // What Rust received is a leading zero plus the shifted bytes, not the
+        // secret the caller believed they wrote.
+        val shifted = ByteArray(8).also { java.util.Arrays.fill(it, 1, 8, 0x33.toByte()) }
+        assertContentEquals(
+            MessageDigest.getInstance("SHA-256").digest(shifted),
+            sha256Consume(session),
+        )
+    }
+
+    @Test
     fun `fillDirect reads from index zero regardless of position`() {
         // Locks the documented base-address semantics: the Java-side cursor is
         // ignored. `fillSession` is the guard-railed API; this asserts the

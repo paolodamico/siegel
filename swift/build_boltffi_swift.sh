@@ -42,11 +42,11 @@ command -v boltffi >/dev/null 2>&1 || {
 
 
 # Ensure the CLI is using the same version as the dependency
-PINNED="$(sed -n 's/^boltffi = "=\(.*\)"$/\1/p' "$CRATE_DIR/Cargo.toml" | head -1)"
+RESOLVED="$(cargo pkgid boltffi 2>/dev/null | sed 's/.*[@#]//')"
 INSTALLED="$(boltffi --version | awk '{print $NF}')"
-if [ -n "$PINNED" ] && [ "$INSTALLED" != "$PINNED" ]; then
-    echo "boltffi CLI is $INSTALLED but siegel-boltffi pins boltffi $PINNED." >&2
-    echo "Install the matching CLI: cargo install boltffi_cli --version $PINNED --locked" >&2
+if [ -n "$RESOLVED" ] && [ "$INSTALLED" != "$RESOLVED" ]; then
+    echo "boltffi CLI is $INSTALLED but cargo resolved boltffi $RESOLVED." >&2
+    echo "Install the matching CLI: cargo install boltffi_cli --version $RESOLVED --locked" >&2
     exit 1
 fi
 

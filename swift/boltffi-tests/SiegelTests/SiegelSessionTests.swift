@@ -148,14 +148,34 @@ final class SiegelSessionTests: XCTestCase {
         XCTAssertEqual(session.len(), 64)
     }
 
-    /// Structured error payloads are a BoltFFI-only capability: UniFFI's
-    /// `flat_error` collapses them to a message. Assert the associated value
-    /// survives the boundary so the shape isn't silently lost on an upgrade.
-    func testStructuredErrorsCarryPayloads() {
-        let error = SessionError.allocationFailed(reason: "out of memory")
-        guard case let .allocationFailed(reason) = error else {
-            return XCTFail("expected allocationFailed")
+    func testStructuredErrorCrossesTheBoundary() throws {
+        let session = try SiegelSession(len: 8)
+        XCTAssertThrowsError(try sha256Consume(session: session)) { error in
+            guard let sessionError = error as? SessionError else {
+                return XCTFail("expected SessionError, got \(error)")
+            }
+            guard case .invalidState = sessionError else {
+                return XCTFail("expected invalidState, got \(sessionError)")
+            }
         }
-        XCTAssertEqual(reason, "out of memory")
+    }
+
+    func testReleasedSessionInvalidatesItsHandle() throws {
+        var handle: UInt64 = 0
+        do {
+            let session = try SiegelSession(len: 8)
+            handle = session.handleId()
+            // Sanity: the handle resolves while the session is alive.
+            XCTAssertEqual(fillRaw(handle, [UInt8](repeating: 0, count: 8)), FILL_OK)
+        }
+        // Swift's ARC is deterministic, so the session is gone here.
+        let rc = fillRaw(handle, [UInt8](repeating: 0, count: 8))
+        XCTAssertEqual(rc, FILL_ERR_INVALID_HANDLE)
+    }
+}
+
+private func fillRaw(_ handle: UInt64, _ bytes: [UInt8]) -> Int32 {
+    bytes.withUnsafeBufferPointer { buf in
+        siegel_fill_bolt(handle, buf.baseAddress, buf.count)
     }
 }

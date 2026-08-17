@@ -17,6 +17,11 @@ pub use siegel::session::{
 ///
 /// Foreign code can fill the session through the raw path ([`siegel_fill_bolt`] on Apple,
 /// `SiegelNative.fillDirect` on the JVM).
+///
+/// # Thread safety
+///
+/// Confine a session to one thread. While the Rust-side is `Mutex`-guarded,
+/// a session is one-time use, racing a fill yields an arbitrary winner.
 pub struct SiegelSession(Arc<SessionCore>);
 
 #[export]

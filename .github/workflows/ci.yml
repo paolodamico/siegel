@@ -12,8 +12,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # IMPORTANT to keep in sync with the boltffi dependency in siegel-boltffi/Cargo.toml.
-  BOLTFFI_VERSION: "0.29.3"
 
 permissions:
   contents: read
@@ -44,15 +42,14 @@ jobs:
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
       # The CLI used here MUST match the boltffi version in the repo
-      - name: Assert boltffi crate matches the pinned CLI version
+      - name: Assert a single boltffi version resolves
         run: |
-          resolved="$(cargo metadata --format-version 1 \
-            | jq -r '[.packages[] | select(.name=="boltffi") | .version] | join(",")')"
-          if [ "$resolved" != "$BOLTFFI_VERSION" ]; then
-            echo "::error::boltffi crate resolved to '$resolved' but BOLTFFI_VERSION is '$BOLTFFI_VERSION'." >&2
+          if ! cargo pkgid boltffi >/dev/null 2>&1; then
+            echo "::error::cargo could not resolve a unique boltffi version" >&2
+            cargo tree -p siegel-boltffi -i boltffi 2>&1 | head -20 >&2
             exit 1
           fi
-          echo "boltffi crate and CLI both pinned at $resolved"
+          echo "resolved boltffi $(cargo pkgid boltffi | sed 's/.*[@#]//')"
 
   test:
     name: Tests
@@ -143,9 +140,12 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 (https://github.com/Swatinem/rust-cache/releases/tag/v2.9.2)
 
-      - name: Install boltffi CLI
+      - name: Install boltffi CLI matching the resolved crate
         if: matrix.binding == 'boltffi'
-        run: cargo install boltffi_cli --version "$BOLTFFI_VERSION" --locked
+        run: |
+          version="$(cargo pkgid boltffi | sed 's/.*[@#]//')"
+          echo "installing boltffi_cli $version"
+          cargo install boltffi_cli --version "$version" --locked
 
       - name: Build and run integration tests
         env:

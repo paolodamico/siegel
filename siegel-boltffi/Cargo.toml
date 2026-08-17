@@ -16,7 +16,7 @@ crate-type = ["lib", "staticlib", "cdylib"]
 
 [features]
 # Not for production use. Enables foreign tests.
-test-utils = ["dep:sha2", "dep:libc", "siegel/test-utils"]
+test-utils = ["dep:sha2", "siegel/test-utils"]
 # additional intermediate logging useful for debugging and security information
 tracing = ["siegel/tracing"]
 # Enables the JNI (Java Native Interface) fill path. Required on Android.
@@ -26,12 +26,17 @@ jvm = ["dep:jni"]
 siegel = { workspace = true, features = ["session"] }
 thiserror = { workspace = true }
 boltffi = "0.29"
-libc = { version = "0.2", optional = true }
 sha2 = { version = "0.10", optional = true }
 
 
 [target.'cfg(any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 jni = { version = "0.22.4", optional = true }
+
+[package.metadata.docs.rs]
+# `jvm` is off by default, so without this the JNI fill path — the API the
+# Kotlin docs tell consumers to call — is neither doc-checked under
+# `RUSTDOCFLAGS: -Dwarnings` nor published.
+features = ["jvm"]
 
 [dev-dependencies]
 sha2 = "0.10"
