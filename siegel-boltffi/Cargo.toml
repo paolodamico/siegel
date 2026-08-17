@@ -1,0 +1,38 @@
+[package]
+name = "siegel-boltffi"
+description = "BoltFFI bindings for Siegel. Enables sharing memory-protected secrets between foreign code and Rust."
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "siegel_boltffi"
+# boltffi requires staticlib for Apple; cdylib for Android
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[features]
+# Not for production use. Enables foreign tests.
+test-utils = ["dep:sha2", "dep:libc", "siegel/test-utils"]
+# additional intermediate logging useful for debugging and security information
+tracing = ["siegel/tracing"]
+
+[dependencies]
+siegel = { workspace = true, features = ["session"] }
+thiserror = { workspace = true }
+boltffi = "0.29"
+libc = { version = "0.2", optional = true }
+sha2 = { version = "0.10", optional = true }
+
+# JNI fill path for JVM (desktop and Android)
+[target.'cfg(any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+jni = "0.22.4"
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[lints]
+workspace = true
