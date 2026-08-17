@@ -15,9 +15,11 @@
 set -euo pipefail
 
 SIM_ONLY=0
+TEST_UTILS=0
 for arg in "$@"; do
     case "$arg" in
         --sim-only) SIM_ONLY=1 ;;
+        --test-utils) TEST_UTILS=1 ;;
         --help|-h) sed -n '2,10p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $arg" >&2; exit 1 ;;
     esac
@@ -26,19 +28,39 @@ done
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CRATE_DIR="$PROJECT_ROOT/siegel-boltffi"
 
-# Build with the test-utils feature so the foreign test suite can reach
-# `sha256_consume` + the guard-page helper. Production consumers must rebuild
-# without it.
-FEATURES="test-utils"
+# Test-only helpers are OFF by default. They export `sha256_consume` and
+# `unsafe_test_only_siegel_front_guard_bolt`
+FEATURES=""
+if [ "$TEST_UTILS" = "1" ]; then
+    FEATURES="test-utils"
+fi
 
 command -v boltffi >/dev/null 2>&1 || {
     echo "boltffi CLI not found. Install with: cargo install boltffi_cli --locked" >&2
     exit 1
 }
 
+
+# Ensure the CLI is using the same version as the dependency
+PINNED="$(sed -n 's/^boltffi = "=\(.*\)"$/\1/p' "$CRATE_DIR/Cargo.toml" | head -1)"
+INSTALLED="$(boltffi --version | awk '{print $NF}')"
+if [ -n "$PINNED" ] && [ "$INSTALLED" != "$PINNED" ]; then
+    echo "boltffi CLI is $INSTALLED but siegel-boltffi pins boltffi $PINNED." >&2
+    echo "Install the matching CLI: cargo install boltffi_cli --version $PINNED --locked" >&2
+    exit 1
+fi
+
 cd "$CRATE_DIR"
 
-PACK_ARGS=(pack apple --release --cargo-arg --features --cargo-arg "$FEATURES")
+# Pack into a clean tree. A previous --sim-only run leaves a simulator-only
+# XCFramework here, and nothing downstream distinguishes it from a release
+# artifact.
+rm -rf "${CRATE_DIR:?}/dist/apple"
+
+PACK_ARGS=(pack apple --release)
+if [ -n "$FEATURES" ]; then
+    PACK_ARGS+=(--cargo-arg --features --cargo-arg "$FEATURES")
+fi
 if [ "$SIM_ONLY" = "1" ]; then
     PACK_ARGS+=(--overlay boltffi.ci.toml)
 fi

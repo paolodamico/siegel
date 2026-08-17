@@ -56,7 +56,15 @@ pub unsafe extern "C" fn unsafe_test_only_siegel_front_guard_bolt(handle: u64) -
 /// [`unsafe_test_only_siegel_front_guard_bolt`] for the JVM suite. Kotlin
 /// cannot reach a bare C symbol without JNA, which `siegel-boltffi`
 /// deliberately does not depend on.
-#[cfg(feature = "jvm")]
+#[cfg(all(
+    feature = "jvm",
+    any(
+        target_os = "android",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows"
+    )
+))]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_siegel_SiegelTestNative_frontGuardSegFault(
     mut env: jni::EnvUnowned<'_>,

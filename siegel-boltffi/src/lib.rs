@@ -20,7 +20,15 @@ pub use session::{
 #[cfg(all(target_os = "android", not(feature = "jvm")))]
 compile_error!("siegel-boltffi requires the `jvm` feature on Android");
 
-#[cfg(feature = "jvm")]
+#[cfg(all(
+    feature = "jvm",
+    any(
+        target_os = "android",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows"
+    )
+))]
 pub mod jvm;
 
 #[cfg(feature = "test-utils")]
