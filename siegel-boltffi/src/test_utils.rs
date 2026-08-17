@@ -48,20 +48,15 @@ fn front_guard_seg_fault(handle: u64) -> i32 {
 /// Spawns a process that intentionally crashes. Caller must accept the
 /// fork/wait semantics described on [`fork_and_run`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn unsafe_test_only_siegel_boltffi_front_guard_seg_fault(handle: u64) -> i32 {
+pub unsafe extern "C" fn unsafe_test_only_siegel_front_guard_bolt(handle: u64) -> i32 {
     front_guard_seg_fault(handle)
 }
 
 /// Test-only JNI entry point, mirroring
-/// [`unsafe_test_only_siegel_boltffi_front_guard_seg_fault`] for the JVM suite. Kotlin
+/// [`unsafe_test_only_siegel_front_guard_bolt`] for the JVM suite. Kotlin
 /// cannot reach a bare C symbol without JNA, which `siegel-boltffi`
 /// deliberately does not depend on.
-#[cfg(any(
-    target_os = "android",
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "windows"
-))]
+#[cfg(feature = "jvm")]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_siegel_SiegelTestNative_frontGuardSegFault(
     mut env: jni::EnvUnowned<'_>,

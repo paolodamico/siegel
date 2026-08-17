@@ -13,16 +13,14 @@ mod session;
 
 pub use session::{
     FILL_ERR_INVALID_HANDLE, FILL_ERR_LEN_MISMATCH, FILL_ERR_NULL_SRC, FILL_ERR_PROTECTION,
-    FILL_ERR_WRONG_STATE, FILL_OK, SessionError, SiegelSession, siegel_boltffi_fill,
+    FILL_ERR_WRONG_STATE, FILL_OK, SessionError, SiegelSession, siegel_fill_bolt,
 };
 
-// Keep in sync with the `jni` dependency cfg in Cargo.toml.
-#[cfg(any(
-    target_os = "android",
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "windows"
-))]
+// Compile-time check: required for Android to fill a session
+#[cfg(all(target_os = "android", not(feature = "jvm")))]
+compile_error!("siegel-boltffi requires the `jvm` feature on Android");
+
+#[cfg(feature = "jvm")]
 pub mod jvm;
 
 #[cfg(feature = "test-utils")]
