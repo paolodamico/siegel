@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
-# Build the host cdylib + generate Kotlin bindings, then run the JUnit
-# suite under `kotlin/siegel-tests/` on the JVM. Prints a colored
-# per-test summary. Set VERBOSE=1 to stream the full Gradle output.
+# Build the host cdylib + generate Kotlin bindings, then run a JUnit suite on
+# the JVM. Prints a colored per-test summary. Set VERBOSE=1 to stream the full
+# Gradle output.
+#
+# Usage: ./kotlin/test_kotlin.sh [uniffi|boltffi]   (default: uniffi)
 set -euo pipefail
 
 BASE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+BINDING="${1:-uniffi}"
+case "$BINDING" in
+    uniffi)  MODULE="siegel-tests";         BUILD_SCRIPT="build_kotlin.sh" ;;
+    boltffi) MODULE="siegel-boltffi-tests"; BUILD_SCRIPT="build_boltffi_kotlin.sh" ;;
+    *) echo "Unknown binding '$BINDING' (expected: uniffi, boltffi)" >&2; exit 1 ;;
+esac
 
 if [ -t 1 ] && [ "${NO_COLOR:-}" = "" ]; then
     GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[0;33m'
@@ -50,8 +59,8 @@ if [ -z "${JAVA_HOME:-}" ]; then
     esac
 fi
 
-echo "Step 1: building host cdylib + Kotlin bindings"
-bash "$BASE_PATH/build_kotlin.sh"
+echo "Step 1: building host cdylib + Kotlin bindings ($BINDING)"
+bash "$BASE_PATH/$BUILD_SCRIPT"
 
 cd "$BASE_PATH"
 
@@ -97,7 +106,7 @@ if [ ! -f "gradlew" ]; then
         --quiet
 fi
 
-TEST_RESULTS_DIR="$BASE_PATH/siegel-tests/build/test-results/test"
+TEST_RESULTS_DIR="$BASE_PATH/$MODULE/build/test-results/test"
 rm -rf "$TEST_RESULTS_DIR"
 
 LOG_FILE="$(mktemp -t siegel-kotlin.XXXXXX)"
@@ -108,10 +117,10 @@ printf 'Step 3: running gradle test %b(output buffered; set VERBOSE=1 to stream)
 
 set +e
 if [ "${VERBOSE:-0}" = "1" ]; then
-    ./gradlew --no-daemon siegel-tests:test --info --continue 2>&1 | tee "$LOG_FILE"
+    ./gradlew --no-daemon "$MODULE:test" --info --continue 2>&1 | tee "$LOG_FILE"
     GRADLE_STATUS=${PIPESTATUS[0]}
 else
-    ./gradlew --no-daemon siegel-tests:test --continue >"$LOG_FILE" 2>&1
+    ./gradlew --no-daemon "$MODULE:test" --continue >"$LOG_FILE" 2>&1
     GRADLE_STATUS=$?
 fi
 set -e
@@ -163,7 +172,7 @@ if [ -d "$TEST_RESULTS_DIR" ]; then
 fi
 TOTAL=$((PASSED + FAILED))
 
-printf '\n%b===== Kotlin Test Results =====%b\n' "$BOLD" "$NC"
+printf '\n%b===== Kotlin Test Results (%s) =====%b\n' "$BOLD" "$BINDING" "$NC"
 if [ "$TOTAL" -gt 0 ]; then
     printf '%s' "$suite_lines"
 else

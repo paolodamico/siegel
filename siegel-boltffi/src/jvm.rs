@@ -2,7 +2,7 @@
 //!
 //! # Rationale
 //!
-//! Apple binds [`siegel_fill_bolt`] directly. The JVM cannot: it has no way to hand
+//! Apple binds [`siegel_fill_bolt`](crate::siegel_fill_bolt) directly. The JVM cannot: it has no way to hand
 //! Rust a raw pointer to a `ByteArray`, and going through `&[u8]` is not safe
 //! for secrets: the `ByteArray` lives on managed heap, it can be copied to a new region
 //! without zeroization.

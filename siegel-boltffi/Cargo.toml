@@ -19,6 +19,8 @@ crate-type = ["lib", "staticlib", "cdylib"]
 test-utils = ["dep:sha2", "dep:libc", "siegel/test-utils"]
 # additional intermediate logging useful for debugging and security information
 tracing = ["siegel/tracing"]
+# Enables the JNI (Java Native Interface) fill path. Required on Android.
+jvm = ["dep:jni"]
 
 [dependencies]
 siegel = { workspace = true, features = ["session"] }
@@ -27,9 +29,9 @@ boltffi = "0.29"
 libc = { version = "0.2", optional = true }
 sha2 = { version = "0.10", optional = true }
 
-# JNI fill path for JVM (desktop and Android)
+
 [target.'cfg(any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
-jni = "0.22.4"
+jni = { version = "0.22.4", optional = true }
 
 [dev-dependencies]
 sha2 = "0.10"
