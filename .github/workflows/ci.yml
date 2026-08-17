@@ -137,7 +137,7 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch HEAD as of 2026-05-20 (https://github.com/dtolnay/rust-toolchain/tree/stable)
         with:
           toolchain: stable
-          targets: ${{ matrix.lang == 'swift' && 'aarch64-apple-ios-sim' || '' }}
+          targets: ${{ matrix.lang == 'swift' && 'aarch64-apple-ios-sim,aarch64-apple-ios,x86_64-apple-ios' || '' }}
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 (https://github.com/Swatinem/rust-cache/releases/tag/v2.9.2)

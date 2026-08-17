@@ -60,7 +60,7 @@ if [ -z "${JAVA_HOME:-}" ]; then
 fi
 
 echo "Step 1: building host cdylib + Kotlin bindings ($BINDING)"
-bash "$BASE_PATH/$BUILD_SCRIPT" "${BUILD_ARGS[@]}"
+bash "$BASE_PATH/$BUILD_SCRIPT" ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}
 
 cd "$BASE_PATH"
 

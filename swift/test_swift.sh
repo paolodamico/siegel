@@ -53,7 +53,8 @@ if ! xcodebuild -showsdks | grep -q 'iphonesimulator'; then
 fi
 
 echo "Step 1: building Swift bindings ($BINDING, sim-only — tests don't need device/Intel slices)"
-bash "$BASE_PATH/$BUILD_SCRIPT" --sim-only "${BUILD_ARGS[@]}"
+# Guarded expansion: bash 3.2 (macOS) errors on an empty array under `set -u`.
+bash "$BASE_PATH/$BUILD_SCRIPT" --sim-only ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}
 [ -d "$XCFRAMEWORK" ] || { echo "Missing XCFramework at $XCFRAMEWORK" >&2; exit 1; }
 
 case "$COPY_SOURCES" in
