@@ -21,3 +21,12 @@ Cargo.lock
 /kotlin/gradlew.bat
 /kotlin/**/build/
 /kotlin/siegel-tests/src/test/kotlin/uniffi/
+
+# BoltFFI generated artifacts
+/siegel-boltffi/dist/
+/kotlin/boltffi-libs/
+/kotlin/siegel-boltffi-tests/src/main/kotlin/generated/
+/swift/boltffi-tests/Sources/
+/swift/boltffi-tests/*.xcframework
+/swift/boltffi-tests/.build/
+/swift/boltffi-tests/*.xcodeproj/

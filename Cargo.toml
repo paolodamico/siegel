@@ -1,9 +1,10 @@
 [workspace]
-members = ["siegel", "siegel-uniffi", "uniffi-bindgen"]
+members = ["siegel", "siegel-boltffi", "siegel-uniffi", "uniffi-bindgen"]
 resolver = "2"
 
 [workspace.package]
 edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 version = "0.3.0"
 authors = [
