@@ -30,6 +30,16 @@ Two binding crates wrap the same `siegel::session` core:
 | [`siegel-boltffi`](siegel-boltffi/README.md) | [BoltFFI](https://boltffi.dev) |
 | [`siegel-uniffi`](siegel-uniffi/README.md) | [UniFFI](https://mozilla.github.io/uniffi-rs/) |
 
+Building foreign bindings or running foreign tests can be done through the `xtask` crate.
+
+```sh
+cargo xtask swift build [uniffi|boltffi]
+cargo xtask swift test  [uniffi|boltffi]
+cargo xtask kotlin build [uniffi|boltffi] 
+cargo xtask kotlin test  [uniffi|boltffi]
+cargo xtask kotlin android                  # BoltFFI Android distribution (needs the NDK)
+```
+
 ## Documentation
 
 See [docs.rs](https://docs.rs/siegel)
