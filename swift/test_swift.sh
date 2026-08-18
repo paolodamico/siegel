@@ -70,12 +70,15 @@ case "$COPY_SOURCES" in
         ;;
     2)
         echo "Step 2: copying generated sources + framework into the test package"
-        rm -rf "${TESTS_PATH:?}/$SOURCES_REL" "${TESTS_PATH:?}/${SWIFT_MODULE}.xcframework"
-        mkdir -p "$TESTS_PATH/$SOURCES_REL"
-        # Flatten: the generated Swift and the C header both sit in Sources/.
-        cp "$DIST_APPLE"/Sources/*.swift "$TESTS_PATH/$SOURCES_REL/"
-        if compgen -G "$DIST_APPLE/Sources/*.h" >/dev/null; then
-            cp "$DIST_APPLE"/Sources/*.h "$TESTS_PATH/$SOURCES_REL/"
+        rm -rf "${TESTS_PATH:?}/Sources" "${TESTS_PATH:?}/${SWIFT_MODULE}.xcframework"
+        mkdir -p "$TESTS_PATH/Sources"
+        # `pack apple` nests the generated Swift under Sources/BoltFFI, so copy
+        # the tree rather than globbing, matching the Package.swift it emits.
+        cp -R "$DIST_APPLE/Sources/." "$TESTS_PATH/Sources/"
+        if ! find "$TESTS_PATH/Sources" -name '*.swift' -print -quit | grep -q .; then
+            echo "No generated Swift under $DIST_APPLE/Sources — layout changed?" >&2
+            find "$DIST_APPLE" -maxdepth 3 | sed 's/^/  /' >&2
+            exit 1
         fi
         cp -R "$XCFRAMEWORK" "$TESTS_PATH/${SWIFT_MODULE}.xcframework"
         ;;

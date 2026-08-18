@@ -65,9 +65,6 @@ fi
 if [ "$SIM_ONLY" = "1" ]; then
     PACK_ARGS+=(--overlay boltffi.ci.toml)
 fi
-if [ "${VERBOSE:-0}" = "1" ]; then
-    PACK_ARGS+=(-v)
-fi
 
 echo "Running: boltffi ${PACK_ARGS[*]}"
 boltffi "${PACK_ARGS[@]}"

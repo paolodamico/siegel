@@ -17,7 +17,7 @@ let package = Package(
         .target(
             name: "Siegel",
             dependencies: ["SiegelFFI"],
-            path: "Sources/Siegel"
+            path: "Sources"
         ),
         .binaryTarget(
             name: "SiegelFFI",
