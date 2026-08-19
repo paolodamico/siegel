@@ -26,7 +26,7 @@ jvm = ["dep:jni"]
 siegel = { workspace = true, features = ["session"] }
 thiserror = { workspace = true }
 boltffi = "0.29"
-sha2 = { version = "0.10", optional = true }
+sha2 = { workspace = true, optional = true }
 
 
 [target.'cfg(any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
@@ -39,7 +39,7 @@ jni = { version = "0.22.4", optional = true }
 features = ["jvm"]
 
 [dev-dependencies]
-sha2 = "0.10"
+sha2 = { workspace = true }
 
 [lints]
 workspace = true

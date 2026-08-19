@@ -16,6 +16,7 @@ repository = "https://github.com/paolodamico/siegel"
 uniffi = { version = "0.31.0", features = ["build"] }
 thiserror = { version = "2" }
 siegel = { version = "0.3.0", path = "siegel" }
+sha2 = { workspace = true }
 
 [profile.release]
 debug = false
