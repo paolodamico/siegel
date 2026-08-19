@@ -9,15 +9,12 @@ use anyhow::{Context, Result, bail};
 use crate::Binding;
 use crate::boltffi;
 use crate::common::{
-    copy_dir_all, copy_file, dir_listing, find_files, host_lib_extension, project_root, remove_dir,
-    reset_dir, run, run_streamed, uniffi_generate,
+    UNIFFI_FEATURES, copy_dir_all, copy_file, dir_listing, ensure_file, find_by_extension,
+    find_files, host_lib_extension, project_root, remove_dir, reset_dir, run, run_streamed,
+    uniffi_generate, verbose,
 };
 use crate::gradle;
 use crate::report::{Runner, summarize};
-
-/// The UniFFI bindings always build with `test-utils`: they exist to drive the
-/// integration suite. Production consumers rebuild without it.
-const UNIFFI_FEATURES: &str = "test-utils";
 
 /// Absolute path to the `kotlin/` directory inside the workspace.
 fn kotlin_dir() -> PathBuf {
@@ -25,15 +22,10 @@ fn kotlin_dir() -> PathBuf {
 }
 
 /// Build the host cdylib and Kotlin bindings for `binding`.
-pub fn build(binding: Binding, test_utils: bool) -> Result<()> {
+pub fn build(binding: Binding) -> Result<()> {
     match binding {
-        Binding::Uniffi => {
-            if test_utils {
-                bail!("--test-utils is not applicable: the UniFFI build always enables it");
-            }
-            build_uniffi()
-        }
-        Binding::Boltffi => build_boltffi(test_utils),
+        Binding::Uniffi => build_uniffi(),
+        Binding::Boltffi => build_boltffi(false),
     }
 }
 
@@ -65,9 +57,7 @@ fn build_uniffi() -> Result<()> {
         "target/release/libsiegel_uniffi.{}",
         host_lib_extension()?
     ));
-    if !lib.is_file() {
-        bail!("cdylib missing at {}", lib.display());
-    }
+    ensure_file(&lib, "cdylib")?;
     let name = lib.file_name().expect("the library path names a file");
     copy_file(&lib, &libs.join(name))?;
     println!("Copied {} to {}", name.to_string_lossy(), libs.display());
@@ -88,17 +78,17 @@ fn build_boltffi(test_utils: bool) -> Result<()> {
     let kotlin = kotlin_dir();
     let crate_dir = boltffi::crate_dir();
     let libs = kotlin.join("boltffi-libs");
-    let generated = kotlin.join("siegel-boltffi-tests/src/main/kotlin/generated");
+    let test_sources = kotlin.join("siegel-boltffi-tests/src/main/kotlin/generated");
     // Test-only helpers are off by default. They export `sha256_consume` and
     // `unsafe_test_only_siegel_front_guard_bolt`.
     let features = if test_utils { "jvm,test-utils" } else { "jvm" };
 
     boltffi::ensure_cli()?;
     let java_home = gradle::java_home_with_jni()?;
-    let host = HostJni::detect()?;
+    let lib_ext = host_lib_extension()?;
 
     reset_dir(&libs)?;
-    reset_dir(&generated)?;
+    reset_dir(&test_sources)?;
 
     println!("Step 1: building host cdylib (siegel-boltffi, features: {features})");
     run(Command::new("cargo")
@@ -113,10 +103,8 @@ fn build_boltffi(test_utils: bool) -> Result<()> {
         ])
         .envs(binding_expansion_env(&crate_dir, features)))?;
 
-    let rust_lib = root.join(format!("target/release/libsiegel_boltffi.{}", host.lib_ext));
-    if !rust_lib.is_file() {
-        bail!("cdylib missing at {}", rust_lib.display());
-    }
+    let rust_lib = root.join(format!("target/release/libsiegel_boltffi.{lib_ext}"));
+    ensure_file(&rust_lib, "cdylib")?;
     copy_file(
         &rust_lib,
         &libs.join(rust_lib.file_name().expect("the library path names a file")),
@@ -138,31 +126,28 @@ fn build_boltffi(test_utils: bool) -> Result<()> {
         ])
         .envs(binding_expansion_env(&crate_dir, features)))?;
 
-    let gen_root = crate_dir.join("dist/android/kotlin");
-    let glue = gen_root.join("jni/jni_glue.c");
-    if !glue.is_file() {
-        bail!("expected JNI glue at {}", glue.display());
-    }
-    copy_dir_all(&gen_root.join("dev"), &generated.join("dev"))?;
+    let packed = crate_dir.join("dist/android/kotlin");
+    let glue = packed.join("jni/jni_glue.c");
+    ensure_file(&glue, "generated JNI glue")?;
+    copy_dir_all(&packed.join("dev"), &test_sources.join("dev"))?;
 
     // Ship the hand-written fill path alongside the generated sources so
     // `dist/android` is a complete, copyable package, and mirror it into the
     // test module's source set.
     let handwritten = boltffi::handwritten_kotlin();
-    if !handwritten.is_file() {
-        bail!("missing {}", handwritten.display());
-    }
-    copy_file(&handwritten, &gen_root.join("dev/siegel/SiegelNative.kt"))?;
-    copy_file(&handwritten, &generated.join("dev/siegel/SiegelNative.kt"))?;
+    ensure_file(&handwritten, "hand-written JNI fill path")?;
+    copy_file(&handwritten, &packed.join("dev/siegel/SiegelNative.kt"))?;
+    copy_file(
+        &handwritten,
+        &test_sources.join("dev/siegel/SiegelNative.kt"),
+    )?;
     println!(
         "  -> {} Kotlin file(s)",
-        find_files(&generated, &|path| path.extension()
-            == Some(OsStr::new("kt")))?
-        .len()
+        find_by_extension(&test_sources, "kt")?.len()
     );
 
     println!("Step 3: compiling JNI glue for the host JVM");
-    compile_jni_glue(&host, &java_home, &gen_root, &libs)?;
+    compile_jni_glue(&java_home, &packed, &libs)?;
 
     println!();
     println!("Artifacts in {}:", libs.display());
@@ -178,73 +163,54 @@ fn build_boltffi(test_utils: bool) -> Result<()> {
 ///
 /// `features` must match the value passed to `boltffi generate`: the macro scan
 /// is cfg-sensitive, so a mismatch silently drops exports.
-fn binding_expansion_env(crate_dir: &Path, features: &str) -> Vec<(String, String)> {
-    vec![
-        ("BOLTFFI_BINDING_EXPANSION".to_owned(), "1".to_owned()),
+fn binding_expansion_env(crate_dir: &Path, features: &str) -> [(&'static str, String); 5] {
+    [
+        ("BOLTFFI_BINDING_EXPANSION", "1".to_owned()),
         (
-            "BOLTFFI_BINDING_EXPANSION_ROOT".to_owned(),
+            "BOLTFFI_BINDING_EXPANSION_ROOT",
             crate_dir.display().to_string(),
         ),
         (
-            "BOLTFFI_BINDING_EXPANSION_SOURCE".to_owned(),
+            "BOLTFFI_BINDING_EXPANSION_SOURCE",
             crate_dir.join("src/lib.rs").display().to_string(),
         ),
-        (
-            "BOLTFFI_BINDING_EXPANSION_SURFACE".to_owned(),
-            "native".to_owned(),
-        ),
-        (
-            "BOLTFFI_BINDING_METADATA_FEATURES".to_owned(),
-            features.to_owned(),
-        ),
+        ("BOLTFFI_BINDING_EXPANSION_SURFACE", "native".to_owned()),
+        ("BOLTFFI_BINDING_METADATA_FEATURES", features.to_owned()),
     ]
-}
-
-/// Host-specific pieces of the JNI build: library suffix, the platform
-/// sub-directory holding `jni_md.h`, and the runtime search-path token.
-struct HostJni {
-    lib_ext: &'static str,
-    jni_md: &'static str,
-    rpath: &'static str,
-}
-
-impl HostJni {
-    fn detect() -> Result<Self> {
-        let lib_ext = host_lib_extension()?;
-        let (jni_md, rpath) = if cfg!(target_os = "macos") {
-            ("darwin", "@loader_path")
-        } else {
-            ("linux", "$ORIGIN")
-        };
-        Ok(Self {
-            lib_ext,
-            jni_md,
-            rpath,
-        })
-    }
 }
 
 /// Link the generated JNI glue against the Rust cdylib.
 ///
 /// The generated Kotlin loads `siegel_boltffi_jni` first, then falls back to
 /// `siegel_boltffi`; the glue supplies the exported `boltffi_*` symbols.
-fn compile_jni_glue(host: &HostJni, java_home: &Path, gen_root: &Path, libs: &Path) -> Result<()> {
-    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_owned());
+fn compile_jni_glue(java_home: &Path, packed: &Path, libs: &Path) -> Result<()> {
+    // `jni_md.h` lives in a platform sub-directory, and the runtime search-path
+    // token that makes the glue find the cdylib beside it is linker-specific.
+    let (jni_md, rpath) = if cfg!(target_os = "macos") {
+        ("darwin", "@loader_path")
+    } else {
+        ("linux", "$ORIGIN")
+    };
+    // An empty `CC` means "not configured", as `${CC:-cc}` did.
+    let cc = std::env::var("CC")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "cc".to_owned());
     run(Command::new(cc)
         .args(["-shared", "-fPIC", "-O2"])
         .arg("-I")
         .arg(java_home.join("include"))
         .arg("-I")
-        .arg(java_home.join("include").join(host.jni_md))
+        .arg(java_home.join("include").join(jni_md))
         .arg("-I")
-        .arg(gen_root.join("jni"))
-        .arg(gen_root.join("jni/jni_glue.c"))
+        .arg(packed.join("jni"))
+        .arg(packed.join("jni/jni_glue.c"))
         .arg("-L")
         .arg(libs)
         .arg("-lsiegel_boltffi")
-        .arg(format!("-Wl,-rpath,{}", host.rpath))
+        .arg(format!("-Wl,-rpath,{rpath}"))
         .arg("-o")
-        .arg(libs.join(format!("libsiegel_boltffi_jni.{}", host.lib_ext))))
+        .arg(libs.join(format!("libsiegel_boltffi_jni.{}", host_lib_extension()?))))
 }
 
 /// Build the Android distribution: `jniLibs` for every ABI, the generated Kotlin
@@ -257,9 +223,7 @@ pub fn android(extra_args: &[String]) -> Result<()> {
     let handwritten = boltffi::handwritten_kotlin();
 
     boltffi::ensure_cli()?;
-    if !handwritten.is_file() {
-        bail!("missing {}", handwritten.display());
-    }
+    ensure_file(&handwritten, "hand-written JNI fill path")?;
     ensure_android_ndk()?;
 
     let dist = crate_dir.join("dist");
@@ -332,12 +296,14 @@ fn check_loader_library(generated: &Path, android_dist: &Path) -> Result<()> {
     let source = std::fs::read_to_string(generated)
         .with_context(|| format!("reading {}", generated.display()))?;
     let Some(expected) = loaded_library_name(&source) else {
+        println!(
+            "  -> skipped: no System.loadLibrary(\"...\") call in {}",
+            generated.display()
+        );
         return Ok(());
     };
     let wanted = format!("lib{expected}.so");
-    let packed = find_files(android_dist, &|path| {
-        path.extension() == Some(OsStr::new("so"))
-    })?;
+    let packed = find_by_extension(android_dist, "so")?;
     if packed
         .iter()
         .any(|path| path.file_name() == Some(OsStr::new(&wanted)))
@@ -387,12 +353,12 @@ pub fn test(binding: Binding) -> Result<()> {
 
     println!("Step 3: running gradle test (set VERBOSE=1 to stream the full log)");
     let mut command = Command::new(kotlin.join("gradlew"));
-    command.current_dir(&kotlin).args([
-        "--no-daemon",
-        &format!("{module}:test"),
-        "--info",
-        "--continue",
-    ]);
+    command
+        .current_dir(&kotlin)
+        .args(["--no-daemon", &format!("{module}:test"), "--continue"]);
+    if verbose() {
+        command.arg("--info");
+    }
     if let Some(home) = gradle::java_home() {
         command.env("JAVA_HOME", home);
     }

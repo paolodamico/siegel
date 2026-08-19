@@ -9,12 +9,37 @@ use std::process::{Command, ExitStatus, Stdio};
 
 use anyhow::{Context, Result, bail};
 
+/// The UniFFI bindings are only ever built to drive the integration suites, so
+/// they always enable `test-utils`. Production consumers rebuild without it.
+pub const UNIFFI_FEATURES: &str = "test-utils";
+
 /// Absolute path to the workspace root.
 pub fn project_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("xtask Cargo.toml lives one directory below the workspace root")
         .to_path_buf()
+}
+
+/// Fail unless the workspace root baked in at compile time still looks like this
+/// checkout.
+///
+/// `CARGO_MANIFEST_DIR` is an absolute path fixed when the binary was compiled.
+/// Cargo normally rebuilds after a move because the path is part of the package
+/// id, but a binary reused from a relocated or copied `target/` directory would
+/// otherwise build into — and delete from — whatever checkout it was first
+/// compiled in. Checked once at startup so the rest of the code can treat
+/// `project_root` as infallible.
+pub fn verify_project_root() -> Result<()> {
+    let root = project_root();
+    if !root.join("Cargo.toml").is_file() {
+        bail!(
+            "workspace root {} has no Cargo.toml — this xtask binary was built for a \
+             different checkout; run `cargo clean -p xtask` and retry",
+            root.display()
+        );
+    }
+    Ok(())
 }
 
 /// Shared-library extension for the host platform.
@@ -68,19 +93,34 @@ pub fn capture(cmd: &mut Command) -> Result<String> {
         .output()
         .with_context(|| format!("failed to spawn: {pretty}"))?;
     if !out.status.success() {
-        bail!("command failed ({}): {pretty}", out.status);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let trailer = if stderr.trim().is_empty() {
+            String::new()
+        } else {
+            format!("\n{}", stderr.trim())
+        };
+        bail!("command failed ({}): {pretty}{trailer}", out.status);
     }
     String::from_utf8(out.stdout).context("non-utf8 command output")
+}
+
+/// Run `cmd` and return its merged stdout+stderr regardless of exit status.
+///
+/// For probes where a non-zero exit is itself information and the output *is*
+/// the diagnostic (`xcodebuild -showsdks`, `rustup target list`). Returns `None`
+/// only when the command could not be spawned at all.
+pub fn capture_lossy(cmd: &mut Command) -> Option<String> {
+    let out = cmd.output().ok()?;
+    let mut merged = String::from_utf8_lossy(&out.stdout).into_owned();
+    merged.push_str(&String::from_utf8_lossy(&out.stderr));
+    Some(merged)
 }
 
 /// Run `cmd`, capturing the merged stdout+stderr stream into a `String` while
 /// live-printing the lines for which `show` returns `true` (or every line under
 /// `VERBOSE=1`). The full buffer is returned so callers can post-process the
 /// noise that was filtered from the console.
-pub fn run_streamed(
-    cmd: &mut Command,
-    show: impl Fn(&str) -> bool,
-) -> Result<(String, ExitStatus)> {
+pub fn run_streamed(cmd: &mut Command, show: fn(&str) -> bool) -> Result<(String, ExitStatus)> {
     let pretty = format!("{cmd:?}");
     let mut child = cmd
         .stdout(Stdio::piped())
@@ -104,18 +144,25 @@ pub fn run_streamed(
         buffer.push_str(&line);
         buffer.push('\n');
     }
-    let _ = stdout_thread.join();
-    let _ = stderr_thread.join();
+    // A panicked forwarder means a silently short log, and the caller derives its
+    // verdict from that log — surface it instead of summarising partial output.
+    if stdout_thread.join().is_err() || stderr_thread.join().is_err() {
+        bail!("a log forwarding thread panicked while running: {pretty}");
+    }
     let status = child.wait().context("waiting for the child process")?;
     Ok((buffer, status))
 }
 
+/// Forward `stream` to `sink`, one line at a time.
+///
+/// Splits on bytes and converts lossily rather than using `BufRead::lines`,
+/// which yields an error for non-UTF-8 input: that would end the forwarder,
+/// truncate the captured log, and close the pipe under a still-running child.
 fn forward_lines<R: std::io::Read>(stream: R, sink: &std::sync::mpsc::Sender<String>) {
-    for line in std::io::BufReader::new(stream)
-        .lines()
-        .map_while(Result::ok)
-    {
-        if sink.send(line).is_err() {
+    for chunk in std::io::BufReader::new(stream).split(b'\n') {
+        let Ok(bytes) = chunk else { break };
+        let line = String::from_utf8_lossy(&bytes);
+        if sink.send(line.trim_end_matches('\r').to_owned()).is_err() {
             break;
         }
     }
@@ -132,13 +179,12 @@ pub fn remove_dir(path: &Path) -> Result<()> {
 /// Remove `path` (recursively) if it exists, then recreate it as an empty directory.
 pub fn reset_dir(path: &Path) -> Result<()> {
     remove_dir(path)?;
-    std::fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
-    Ok(())
+    create_dir(path)
 }
 
 /// Recursively copy the contents of `src` into `dst`, creating `dst` as needed.
 pub fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst).with_context(|| format!("creating {}", dst.display()))?;
+    create_dir(dst)?;
     for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
         let entry = entry?;
         let from = entry.path();
@@ -160,14 +206,25 @@ pub fn copy_file(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Move a single file. Falls back to copy+delete so the move works across
-/// filesystems (`std::fs::rename` fails with `EXDEV`).
+/// Move a single file, reporting both paths on failure.
 pub fn move_file(from: &Path, to: &Path) -> Result<()> {
-    if std::fs::rename(from, to).is_ok() {
-        return Ok(());
+    std::fs::rename(from, to)
+        .with_context(|| format!("moving {} to {}", from.display(), to.display()))?;
+    Ok(())
+}
+
+/// Create `path` and any missing parents.
+pub fn create_dir(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
+    Ok(())
+}
+
+/// Fail unless `path` is an existing file. `what` names it in the error, e.g.
+/// `"cdylib"` produces `cdylib missing at /path/to/lib.so`.
+pub fn ensure_file(path: &Path, what: &str) -> Result<()> {
+    if !path.is_file() {
+        bail!("{what} missing at {}", path.display());
     }
-    copy_file(from, to)?;
-    std::fs::remove_file(from).with_context(|| format!("removing {}", from.display()))?;
     Ok(())
 }
 
@@ -213,6 +270,13 @@ pub fn find_files(dir: &Path, keep: &dyn Fn(&Path) -> bool) -> Result<Vec<PathBu
     collect_files(dir, keep, &mut found)?;
     found.sort();
     Ok(found)
+}
+
+/// Recursively collect every file under `dir` whose extension is `extension`.
+pub fn find_by_extension(dir: &Path, extension: &str) -> Result<Vec<PathBuf>> {
+    find_files(dir, &|path| {
+        path.extension() == Some(std::ffi::OsStr::new(extension))
+    })
 }
 
 fn collect_files(dir: &Path, keep: &dyn Fn(&Path) -> bool, out: &mut Vec<PathBuf>) -> Result<()> {

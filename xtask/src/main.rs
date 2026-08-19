@@ -11,7 +11,6 @@ mod report;
 mod swift;
 
 use std::fmt;
-use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -57,7 +56,7 @@ impl fmt::Display for Binding {
 
 #[derive(Subcommand)]
 enum SwiftCmd {
-    /// Build `Siegel.xcframework` + the generated Swift sources.
+    /// Build `Siegel.xcframework` + the generated Swift sources into `swift/`.
     Build {
         #[arg(value_enum, default_value_t = Binding::Uniffi)]
         binding: Binding,
@@ -65,14 +64,6 @@ enum SwiftCmd {
         /// XCTest suite. Release/distribution builds must omit it.
         #[arg(long)]
         sim_only: bool,
-        /// Enable the `test-utils` feature. BoltFFI only; the UniFFI build
-        /// always enables it.
-        #[arg(long)]
-        test_utils: bool,
-        /// Where the `.xcframework` lands, absolute or relative to `swift/`
-        /// (default: `swift/`). UniFFI only.
-        #[arg(long)]
-        out_dir: Option<PathBuf>,
     },
     /// Build the bindings and run the foreign XCTest suite on an iOS Simulator.
     Test {
@@ -87,10 +78,6 @@ enum KotlinCmd {
     Build {
         #[arg(value_enum, default_value_t = Binding::Uniffi)]
         binding: Binding,
-        /// Enable the `test-utils` feature. BoltFFI only; the UniFFI build
-        /// always enables it.
-        #[arg(long)]
-        test_utils: bool,
     },
     /// Build the host bindings and run the foreign JUnit suite on the JVM.
     Test {
@@ -100,28 +87,23 @@ enum KotlinCmd {
     /// Build the BoltFFI Android distribution (`jniLibs` for every ABI).
     /// Requires the Android NDK.
     Android {
-        /// Extra arguments forwarded to `boltffi pack android`.
-        #[arg(trailing_var_arg = true)]
+        /// Extra arguments forwarded to `boltffi pack android`. Hyphenated flags
+        /// pass through, so `-v` reaches boltffi rather than clap.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         boltffi_args: Vec<String>,
     },
 }
 
 fn main() -> Result<()> {
-    match Cli::parse().cmd {
+    let cli = Cli::parse();
+    common::verify_project_root()?;
+    match cli.cmd {
         Cmd::Swift { cmd } => match cmd {
-            SwiftCmd::Build {
-                binding,
-                sim_only,
-                test_utils,
-                out_dir,
-            } => swift::build(binding, sim_only, test_utils, out_dir.as_deref()),
+            SwiftCmd::Build { binding, sim_only } => swift::build(binding, sim_only),
             SwiftCmd::Test { binding } => swift::test(binding),
         },
         Cmd::Kotlin { cmd } => match cmd {
-            KotlinCmd::Build {
-                binding,
-                test_utils,
-            } => kotlin::build(binding, test_utils),
+            KotlinCmd::Build { binding } => kotlin::build(binding),
             KotlinCmd::Test { binding } => kotlin::test(binding),
             KotlinCmd::Android { boltffi_args } => kotlin::android(&boltffi_args),
         },

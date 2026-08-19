@@ -55,7 +55,7 @@ Requires the `boltffi` CLI:
 cargo install boltffi_cli --version "$(cargo pkgid boltffi | sed 's/.*[@#]//')" --locked
 ```
 
-The CLI version must equal the resolved `boltffi` version, otherwise this could lead to a `undefined symbol` error.
+The CLI version must equal the resolved `boltffi` version, otherwise this could lead to an `undefined symbol` error.
 
 Then, from the repository root:
 

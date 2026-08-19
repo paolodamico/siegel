@@ -62,7 +62,8 @@ fn resolved_version() -> Result<String> {
             .args(["pkgid", "boltffi"]),
     )
     .context(
-        "cargo could not resolve a unique boltffi version — check `cargo tree -p siegel-boltffi -i boltffi`",
+        "cargo could not resolve a unique boltffi version — \
+         check `cargo tree -p siegel-boltffi -i boltffi`",
     )?;
     Ok(package_version(pkgid.trim()).to_owned())
 }
@@ -71,9 +72,8 @@ fn resolved_version() -> Result<String> {
 /// `@<version>` depending on the source.
 fn package_version(pkgid: &str) -> &str {
     pkgid
-        .rsplit(['@', '#'])
-        .next()
-        .expect("rsplit always yields at least one element")
+        .rsplit_once(['@', '#'])
+        .map_or(pkgid, |(_, version)| version)
 }
 
 #[cfg(test)]

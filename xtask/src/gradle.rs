@@ -1,14 +1,13 @@
 //! Gradle bootstrapping, JDK discovery, and JUnit report parsing.
 
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
-use crate::common::{capture, create_temp_dir, find_files, has_command, remove_dir, run};
-use crate::report::TestCase;
+use crate::common::{capture, create_temp_dir, find_by_extension, has_command, remove_dir, run};
+use crate::report::{Outcome, TestCase};
 
 /// Gradle version bootstrapped when the checkout has no wrapper. Pinned to an
 /// 8.x release compatible with the Kotlin/JVM toolchain in `build.gradle.kts`.
@@ -29,6 +28,7 @@ const JDK_VERSION: &str = "17";
 /// than written back into this process's environment.
 pub fn java_home() -> Option<PathBuf> {
     std::env::var_os("JAVA_HOME")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(discover_java_home)
 }
@@ -89,11 +89,18 @@ pub fn ensure_wrapper(project: &Path) -> Result<()> {
 
     let tmp = create_temp_dir("siegel-gradle")?;
     let result = bootstrap_wrapper(project, &tmp);
-    remove_dir(&tmp)?;
+    // Report a cleanup failure without discarding `result`: the bootstrap error
+    // is the one the user needs.
+    if let Err(error) = remove_dir(&tmp) {
+        println!("warning: could not clean up {}: {error}", tmp.display());
+    }
     result
 }
 
 fn bootstrap_wrapper(project: &Path, tmp: &Path) -> Result<()> {
+    // Wrapper generation must run on the JDK the tests will use, or it fails
+    // outright against a JDK older than Gradle 8's minimum.
+    let java = java_home();
     let zip = tmp.join("gradle.zip");
     let url = format!("https://services.gradle.org/distributions/gradle-{GRADLE_VERSION}-bin.zip");
     run(Command::new("curl")
@@ -118,32 +125,25 @@ fn bootstrap_wrapper(project: &Path, tmp: &Path) -> Result<()> {
     // `--no-daemon` is load-bearing: a daemon forked from `unpacked` would
     // outlive the temporary directory we delete right after, and the next
     // bootstrap would reuse it and die on the missing jars.
-    run(
-        Command::new(unpacked.join(format!("gradle-{GRADLE_VERSION}/bin/gradle")))
-            .arg("--no-daemon")
-            .arg("-p")
-            .arg(project)
-            .args([
-                "wrapper",
-                "--gradle-version",
-                GRADLE_VERSION,
-                "--gradle-distribution-sha256-sum",
-                GRADLE_SHA256,
-                "--quiet",
-            ]),
-    )
+    let mut command = Command::new(unpacked.join(format!("gradle-{GRADLE_VERSION}/bin/gradle")));
+    command.arg("--no-daemon").arg("-p").arg(project).args([
+        "wrapper",
+        "--gradle-version",
+        GRADLE_VERSION,
+        "--gradle-distribution-sha256-sum",
+        GRADLE_SHA256,
+        "--quiet",
+    ]);
+    if let Some(home) = java {
+        command.env("JAVA_HOME", home);
+    }
+    run(&mut command)
 }
 
 /// Fail unless `path` hashes to `expected`.
 fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let actual = Sha256::digest(&bytes)
-        .iter()
-        .fold(String::new(), |mut acc, byte| {
-            use std::fmt::Write as _;
-            let _ = write!(acc, "{byte:02x}");
-            acc
-        });
+    let actual = format!("{:x}", Sha256::digest(&bytes));
     if actual != expected {
         bail!(
             "SHA-256 mismatch for {}\n  expected: {expected}\n  actual:   {actual}",
@@ -171,8 +171,10 @@ pub fn is_output_interesting(line: &str) -> bool {
         || trimmed.contains("PASSED")
         || trimmed.contains("FAILED")
         || trimmed.contains("FAILURE")
-        || line.contains("e: ")
-        || line.contains("w: ")
+        // Kotlin compiler diagnostics: `e: file:line:col: message`. Anchored,
+        // because an unanchored "e: " also matches ordinary Gradle prose.
+        || trimmed.starts_with("e: ")
+        || trimmed.starts_with("w: ")
 }
 
 /// Selects the Gradle log lines worth showing when a test case fails.
@@ -183,7 +185,7 @@ pub fn is_failure_detail(line: &str) -> bool {
 /// Parse every JUnit XML report under `dir` into one entry per `<testcase>`.
 pub fn parse_results(dir: &Path) -> Result<Vec<TestCase>> {
     let mut cases = Vec::new();
-    for file in find_files(dir, &|path| path.extension() == Some(OsStr::new("xml")))? {
+    for file in find_by_extension(dir, "xml")? {
         let xml = std::fs::read_to_string(&file)
             .with_context(|| format!("reading {}", file.display()))?;
         cases.extend(parse_report(&xml));
@@ -191,37 +193,49 @@ pub fn parse_results(dir: &Path) -> Result<Vec<TestCase>> {
     Ok(cases)
 }
 
-/// Walk the `<testcase>` elements of one JUnit report. A nested `<failure>` or
-/// `<error>` child marks the case as failed; a self-closing element passed.
+/// Split a JUnit report into one entry per `<testcase>` element.
 fn parse_report(xml: &str) -> Vec<TestCase> {
-    let mut cases = Vec::new();
-    let mut lines = xml.lines();
-    while let Some(line) = lines.next() {
-        if !line.contains("<testcase") {
-            continue;
-        }
-        let mut passed = true;
-        if !line.contains("/>") {
-            for body in lines.by_ref() {
-                if body.contains("<failure") || body.contains("<error") {
-                    passed = false;
-                }
-                if body.contains("</testcase>") {
-                    break;
-                }
-            }
-        }
-        cases.push(TestCase {
-            name: format!(
-                "{}.{}",
-                attr(line, "classname").unwrap_or_default(),
-                attr(line, "name").unwrap_or_default()
-            ),
-            duration: format!("{}s", attr(line, "time").unwrap_or_default()),
-            passed,
-        });
-    }
-    cases
+    xml.split("<testcase")
+        .skip(1)
+        .filter_map(parse_case)
+        .collect()
+}
+
+/// Parse one `<testcase>` element from `chunk`, which begins immediately after
+/// the opening `<testcase` and runs to the end of the document.
+///
+/// Element-based rather than line-based: Gradle currently newline-indents the
+/// children, but `<testcase …><failure/></testcase>` on one line is equally
+/// valid XML and a line-oriented scan reads it as a self-closing pass.
+fn parse_case(chunk: &str) -> Option<TestCase> {
+    let tag_end = chunk.find('>')?;
+    let attributes = &chunk[..tag_end];
+    // `<testcase … />` has no children: it ran and passed.
+    let body = if attributes.trim_end().ends_with('/') {
+        ""
+    } else {
+        let rest = &chunk[tag_end + 1..];
+        &rest[..rest.find("</testcase>").unwrap_or(rest.len())]
+    };
+
+    // A failure outranks a skip: Gradle emits both when a test throws while
+    // being disabled.
+    let outcome = if body.contains("<failure") || body.contains("<error") {
+        Outcome::Failed
+    } else if body.contains("<skipped") {
+        Outcome::Skipped
+    } else {
+        Outcome::Passed
+    };
+    Some(TestCase {
+        name: format!(
+            "{}.{}",
+            attr(attributes, "classname").unwrap_or_default(),
+            attr(attributes, "name").unwrap_or_default()
+        ),
+        duration: format!("{}s", attr(attributes, "time").unwrap_or_default()),
+        outcome,
+    })
 }
 
 /// Read the value of the `name="…"` attribute from an XML element line.
@@ -238,7 +252,7 @@ fn attr<'a>(line: &'a str, name: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{attr, is_failure_detail, parse_report};
+    use super::{Outcome, attr, is_failure_detail, is_output_interesting, parse_report};
 
     #[test]
     fn reads_attributes_without_matching_suffixes() {
@@ -261,7 +275,7 @@ mod tests {
         assert_eq!(cases.len(), 1);
         assert_eq!(cases[0].name, "C.a");
         assert_eq!(cases[0].duration, "0.5s");
-        assert!(cases[0].passed);
+        assert_eq!(cases[0].outcome, Outcome::Passed);
     }
 
     #[test]
@@ -274,8 +288,8 @@ mod tests {
                    </testsuite>";
         let cases = parse_report(xml);
         assert_eq!(cases.len(), 2);
-        assert!(!cases[0].passed);
-        assert!(cases[1].passed);
+        assert_eq!(cases[0].outcome, Outcome::Failed);
+        assert_eq!(cases[1].outcome, Outcome::Passed);
     }
 
     #[test]
@@ -283,7 +297,31 @@ mod tests {
         let xml = "<testcase name=\"a\" classname=\"C\" time=\"0.1\">\n\
                    <error message=\"boom\"/>\n\
                    </testcase>";
-        assert!(!parse_report(xml)[0].passed);
+        assert_eq!(parse_report(xml)[0].outcome, Outcome::Failed);
+    }
+
+    #[test]
+    fn nested_skipped_is_not_reported_as_a_pass() {
+        let xml = "<testcase name=\"a\" classname=\"C\" time=\"0.0\">\n\
+                   <skipped/>\n\
+                   </testcase>";
+        assert_eq!(parse_report(xml)[0].outcome, Outcome::Skipped);
+    }
+
+    #[test]
+    fn a_single_line_element_with_a_failure_child_is_not_read_as_a_pass() {
+        let xml =
+            r#"<testcase name="a" classname="C" time="0.1"><failure message="boom"/></testcase>"#;
+        assert_eq!(parse_report(xml)[0].outcome, Outcome::Failed);
+    }
+
+    #[test]
+    fn a_failure_outranks_a_skip_in_the_same_case() {
+        let xml = "<testcase name=\"a\" classname=\"C\" time=\"0.0\">\n\
+                   <skipped/>\n\
+                   <failure message=\"boom\"/>\n\
+                   </testcase>";
+        assert_eq!(parse_report(xml)[0].outcome, Outcome::Failed);
     }
 
     #[test]
@@ -293,8 +331,19 @@ mod tests {
                    <failure/>\n\
                    </testcase>";
         let cases = parse_report(xml);
-        assert!(cases[0].passed);
-        assert!(!cases[1].passed);
+        assert_eq!(cases[0].outcome, Outcome::Passed);
+        assert_eq!(cases[1].outcome, Outcome::Failed);
+    }
+
+    #[test]
+    fn output_filter_ignores_info_prose_that_merely_contains_e_colon() {
+        assert!(is_output_interesting(
+            "e: Session.kt:12:5: unresolved reference"
+        ));
+        assert!(!is_output_interesting("Cache value: 12 entries"));
+        assert!(!is_output_interesting(
+            "Resolving dependencies for scope: test"
+        ));
     }
 
     #[test]
