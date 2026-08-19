@@ -35,7 +35,7 @@ Building foreign bindings or running foreign tests can be done through the `xtas
 ```sh
 cargo xtask swift build [uniffi|boltffi]
 cargo xtask swift test  [uniffi|boltffi]
-cargo xtask kotlin build [uniffi|boltffi] 
+cargo xtask kotlin build [uniffi|boltffi]
 cargo xtask kotlin test  [uniffi|boltffi]
 cargo xtask kotlin android                  # BoltFFI Android distribution (needs the NDK)
 ```

@@ -14,9 +14,7 @@ repository.workspace = true
 name = "xtask"
 path = "src/main.rs"
 
-# Deliberately omits `[lints] workspace = true`: the workspace denies
-# `print_stdout`/`print_stderr`, and this crate's whole job is to print progress.
-# `main.rs` denies clippy's `all`/`pedantic`/`nursery` groups instead.
+# Deliberately omits workspace lints (doesn't allow print)
 
 [dependencies]
 anyhow = "1.0"
