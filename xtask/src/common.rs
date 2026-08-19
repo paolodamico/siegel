@@ -231,13 +231,22 @@ fn collect_files(dir: &Path, keep: &dyn Fn(&Path) -> bool, out: &mut Vec<PathBuf
     Ok(())
 }
 
-/// Print the entries of `dir` up to `max_depth` levels deep, one indented
-/// relative path per line, so a task can show what it produced.
-pub fn print_dir_entries(dir: &Path, max_depth: usize) -> Result<()> {
-    for path in list_entries(dir, max_depth)? {
-        println!("  {}", path.strip_prefix(dir).unwrap_or(&path).display());
+/// Render the entries of `dir`, up to `max_depth` levels deep, as indented
+/// relative paths — one per line.
+///
+/// Best-effort by design: every caller uses this for human-facing context
+/// (either "here is what the task produced" or a diagnostic attached to an
+/// error), so an unreadable directory reports itself rather than masking the
+/// failure the caller is already describing.
+pub fn dir_listing(dir: &Path, max_depth: usize) -> String {
+    match list_entries(dir, max_depth) {
+        Ok(entries) => entries
+            .iter()
+            .map(|path| format!("  {}", path.strip_prefix(dir).unwrap_or(path).display()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(error) => format!("  <could not read {}: {error}>", dir.display()),
     }
-    Ok(())
 }
 
 fn list_entries(dir: &Path, max_depth: usize) -> Result<Vec<PathBuf>> {

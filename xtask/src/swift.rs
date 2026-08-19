@@ -9,8 +9,8 @@ use anyhow::{Context, Result, bail};
 use crate::Binding;
 use crate::boltffi;
 use crate::common::{
-    capture, copy_file, in_ci, move_file, print_dir_entries, project_root, remove_dir, reset_dir,
-    run, run_streamed, uniffi_generate, verbose,
+    capture, copy_file, dir_listing, find_files, in_ci, move_file, project_root, remove_dir, run,
+    run_streamed, uniffi_generate,
 };
 use crate::report::{Runner, TestCase, summarize};
 
@@ -242,16 +242,14 @@ fn build_boltffi(sim_only: bool, test_utils: bool) -> Result<()> {
     if sim_only {
         args.extend(["--overlay", "boltffi.ci.toml"].map(str::to_owned));
     }
-    if verbose() {
-        args.push("-v".to_owned());
-    }
 
     println!("Running: boltffi {}", args.join(" "));
     run(Command::new("boltffi").current_dir(&crate_dir).args(&args))?;
 
     println!();
     println!("Apple artifacts in {}:", dist.display());
-    print_dir_entries(&dist, 1)
+    println!("{}", dir_listing(&dist, 1));
+    Ok(())
 }
 
 /// Build the bindings sim-only and run the foreign XCTest suite on a simulator.
@@ -341,39 +339,37 @@ fn copy_uniffi_sources(swift: &Path, tests: &Path) -> Result<()> {
 /// generated sources and the framework are copied in rather than referenced
 /// across the repo.
 fn copy_boltffi_sources(framework: &Path, tests: &Path) -> Result<()> {
-    let dist_sources = boltffi::crate_dir().join("dist/apple/Sources");
-    let dest = tests.join(format!("Sources/{SWIFT_MODULE}"));
+    let packed = boltffi::crate_dir().join("dist/apple");
+    let packed_sources = packed.join("Sources");
+    let dest_sources = tests.join("Sources");
     let dest_framework = tests.join(format!("{SWIFT_MODULE}.xcframework"));
 
-    reset_dir(&dest)?;
+    remove_dir(&dest_sources)?;
     remove_dir(&dest_framework)?;
+    std::fs::create_dir_all(&dest_sources)
+        .with_context(|| format!("creating {}", dest_sources.display()))?;
 
-    // Flatten: the generated Swift and the C header both sit in `Sources/`.
-    let mut copied = 0_usize;
-    for entry in std::fs::read_dir(&dist_sources)
-        .with_context(|| format!("reading {}", dist_sources.display()))?
-    {
-        let path = entry?.path();
-        let is_source = matches!(
-            path.extension().and_then(OsStr::to_str),
-            Some("swift" | "h")
+    // `pack apple` nests the generated Swift under `Sources/BoltFFI`, so copy
+    // the tree rather than flattening it — the `Package.swift` in the test
+    // package points its target at `Sources`. `cp -R` also handles the
+    // xcframework below, where only `cp` preserves the symlinks and attributes
+    // that make the bundle loadable.
+    run(Command::new("cp")
+        .arg("-R")
+        .arg(packed_sources.join("."))
+        .arg(&dest_sources))?;
+
+    let copied = find_files(&dest_sources, &|path| {
+        path.extension() == Some(OsStr::new("swift"))
+    })?;
+    if copied.is_empty() {
+        bail!(
+            "No generated Swift under {} — layout changed?\n{}",
+            packed_sources.display(),
+            dir_listing(&packed, 3)
         );
-        if !is_source {
-            continue;
-        }
-        copy_file(
-            &path,
-            &dest.join(path.file_name().expect("read_dir entries are named")),
-        )?;
-        copied += 1;
-    }
-    if copied == 0 {
-        bail!("no generated sources found in {}", dist_sources.display());
     }
 
-    // `cp -R` rather than a hand-rolled walk: an xcframework is a bundle, and
-    // only `cp` preserves the symlinks, permissions, and extended attributes
-    // that make it loadable.
     run(Command::new("cp")
         .arg("-R")
         .arg(framework)

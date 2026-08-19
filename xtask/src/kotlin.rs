@@ -9,8 +9,8 @@ use anyhow::{Context, Result, bail};
 use crate::Binding;
 use crate::boltffi;
 use crate::common::{
-    copy_dir_all, copy_file, find_files, host_lib_extension, print_dir_entries, project_root,
-    remove_dir, reset_dir, run, run_streamed, uniffi_generate,
+    copy_dir_all, copy_file, dir_listing, find_files, host_lib_extension, project_root, remove_dir,
+    reset_dir, run, run_streamed, uniffi_generate,
 };
 use crate::gradle;
 use crate::report::{Runner, summarize};
@@ -166,7 +166,8 @@ fn build_boltffi(test_utils: bool) -> Result<()> {
 
     println!();
     println!("Artifacts in {}:", libs.display());
-    print_dir_entries(&libs, 1)
+    println!("{}", dir_listing(&libs, 1));
+    Ok(())
 }
 
 /// The `BOLTFFI_BINDING_EXPANSION*` environment is load-bearing, not incidental.
@@ -305,7 +306,8 @@ pub fn android(extra_args: &[String]) -> Result<()> {
 
     println!();
     println!("Android artifacts under {}:", android_dist.display());
-    print_dir_entries(&android_dist, 2)
+    println!("{}", dir_listing(&android_dist, 2));
+    Ok(())
 }
 
 /// Fail with an actionable message rather than whatever a missing linker
