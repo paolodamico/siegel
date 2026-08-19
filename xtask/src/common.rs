@@ -22,14 +22,7 @@ pub fn project_root() -> PathBuf {
 }
 
 /// Fail unless the workspace root baked in at compile time still looks like this
-/// checkout.
-///
-/// `CARGO_MANIFEST_DIR` is an absolute path fixed when the binary was compiled.
-/// Cargo normally rebuilds after a move because the path is part of the package
-/// id, but a binary reused from a relocated or copied `target/` directory would
-/// otherwise build into — and delete from — whatever checkout it was first
-/// compiled in. Checked once at startup so the rest of the code can treat
-/// `project_root` as infallible.
+/// checkout
 pub fn verify_project_root() -> Result<()> {
     let root = project_root();
     if !root.join("Cargo.toml").is_file() {
