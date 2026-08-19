@@ -22,11 +22,9 @@ dependencies {
 
 tasks.test {
     useJUnit()
-    // JNA discovers `libsiegel_uniffi.{so,dylib}` here; `build_kotlin.sh`
-    // drops the host cdylib into this directory before tests run.
+    // JNA discovers `libsiegel_uniffi.{so,dylib}` here; `cargo xtask kotlin
+    // build` drops the host cdylib into this directory before tests run.
     systemProperty("jna.library.path", "${rootDir}/libs")
-    // We render our own summary in `test_kotlin.sh`; the HTML report is
-    // dead weight in CI logs.
     reports.html.required.set(false)
     testLogging {
         events("passed", "failed", "skipped")

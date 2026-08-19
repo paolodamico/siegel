@@ -24,10 +24,10 @@ tracing = ["siegel/tracing"]
 siegel = { workspace = true, features = ["session"] }
 thiserror = { workspace = true }
 uniffi = { workspace = true }
-sha2 = { version = "0.10", optional = true }
+sha2 = { workspace = true, optional = true }
 
 [dev-dependencies]
-sha2 = "0.10"
+sha2 = { workspace = true }
 
 [lints]
 workspace = true

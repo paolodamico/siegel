@@ -4,7 +4,7 @@ crate = "siegel-boltffi"
 
 [targets.apple]
 enabled = true
-deployment_target = "13.0" # Matches IPHONEOS_DEPLOYMENT_TARGET in swift/build_swift.sh.
+deployment_target = "13.0" # Matches IOS_DEPLOYMENT_TARGET in xtask/src/swift.rs.
 ios_architectures = ["arm64"]
 simulator_architectures = ["arm64", "x86_64"]
 

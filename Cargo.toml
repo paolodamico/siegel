@@ -1,5 +1,5 @@
 [workspace]
-members = ["siegel", "siegel-boltffi", "siegel-uniffi", "uniffi-bindgen"]
+members = ["siegel", "siegel-boltffi", "siegel-uniffi", "uniffi-bindgen", "xtask"]
 resolver = "2"
 
 [workspace.package]
@@ -16,6 +16,7 @@ repository = "https://github.com/paolodamico/siegel"
 uniffi = { version = "0.32", features = ["build"] }
 thiserror = { version = "2" }
 siegel = { version = "0.3.0", path = "siegel" }
+sha2 = { version = "0.10" }
 
 [profile.release]
 debug = false

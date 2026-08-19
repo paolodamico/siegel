@@ -151,9 +151,7 @@ jobs:
           cargo install boltffi_cli --version "$version" --locked
 
       - name: Build and run integration tests
-        env:
-          VERBOSE: 1
-        run: ./${{ matrix.lang }}/test_${{ matrix.lang }}.sh ${{ matrix.binding }}
+        run: cargo xtask ${{ matrix.lang }} test ${{ matrix.binding }}
 
   deny:
     name: Cargo deny
