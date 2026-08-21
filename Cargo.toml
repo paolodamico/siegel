@@ -1,6 +1,8 @@
 [workspace]
 members = ["siegel", "siegel-boltffi", "siegel-uniffi", "uniffi-bindgen"]
-resolver = "2"
+# Resolver 3 is MSRV-aware: with resolver 2 a fresh checkout selects icu_* 2.3
+# (Rust 1.88) via boltffi -> url -> idna, which the 1.85 MSRV job cannot build.
+resolver = "3"
 
 [workspace.package]
 edition = "2024"

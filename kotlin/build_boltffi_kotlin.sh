@@ -83,6 +83,11 @@ cargo build --package "$PACKAGE_NAME" --features "$FEATURES" --release
 RUST_LIB="$PROJECT_ROOT/target/release/lib${LIB_NAME}.${LIB_EXT}"
 [ -f "$RUST_LIB" ] || { echo "cdylib missing at $RUST_LIB" >&2; exit 1; }
 cp "$RUST_LIB" "$LIBS_DIR/"
+if [ "$LIB_EXT" = "dylib" ]; then
+    # rustc stamps an absolute LC_ID_DYLIB under target/; a dependent would
+    # record that path and the @loader_path rpath could not redirect it.
+    install_name_tool -id "@rpath/lib${LIB_NAME}.dylib" "$LIBS_DIR/lib${LIB_NAME}.dylib"
+fi
 echo "  -> $(basename "$RUST_LIB")"
 
 echo "Step 2: generating Kotlin bindings + JNI glue"

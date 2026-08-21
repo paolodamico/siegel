@@ -70,9 +70,14 @@ impl SessionCore {
         if registry.len() >= MAX_ACTIVE_SESSIONS {
             // Checked before allocation to avoid wasting resources
             #[cfg(feature = "tracing")]
+            let active = registry.len();
+            // Release before emitting: a subscriber runs synchronously, and one
+            // that touches a session would re-enter this non-reentrant lock.
+            drop(registry);
+            #[cfg(feature = "tracing")]
             tracing::warn!(
                 target: "siegel",
-                active = registry.len(),
+                active,
                 max = MAX_ACTIVE_SESSIONS,
                 "session cap reached; refusing to allocate (leaked sessions?)"
             );
@@ -189,6 +194,8 @@ impl SessionCore {
             }
             Err(e) => {
                 // Siegel::write consumed `empty` on failure. State stays Consumed.
+                // Release before emitting, for the same reason as the cap warning.
+                drop(state);
                 #[cfg(feature = "tracing")]
                 tracing::warn!(
                     target: "siegel",
