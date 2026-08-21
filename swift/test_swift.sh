@@ -1,13 +1,42 @@
 #!/usr/bin/env bash
-# Build the iOS XCFramework, then run the XCTest suite under
-# `swift/tests/` on an iOS Simulator via xcodebuild.
+# Build the iOS XCFramework, then run an XCTest suite on an iOS Simulator via
+# xcodebuild.
+#
+# Usage: ./swift/test_swift.sh [uniffi|boltffi]   (default: uniffi)
 set -euo pipefail
 
 BASE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TESTS_PATH="$BASE_PATH/tests"
+PROJECT_ROOT="$(cd "$BASE_PATH/.." && pwd)"
 SWIFT_MODULE="Siegel"
-LIB_NAME="siegel_uniffi"
 SOURCES_REL="Sources/${SWIFT_MODULE}"
+
+BINDING="${1:-uniffi}"
+case "$BINDING" in
+    uniffi)
+        TESTS_PATH="$BASE_PATH/tests"
+        BUILD_SCRIPT="build_swift.sh"
+        SCHEME="SiegelIntegrationTests"
+        XCFRAMEWORK="$BASE_PATH/${SWIFT_MODULE}.xcframework"
+        LIB_NAME="siegel_uniffi"
+        # UniFFI's generated Swift lives next to the framework; copy it into
+        # the test package's source set.
+        COPY_SOURCES=1
+        BUILD_FLAG=""
+        ;;
+    boltffi)
+        TESTS_PATH="$BASE_PATH/boltffi-tests"
+        BUILD_SCRIPT="build_boltffi_swift.sh"
+        SCHEME="SiegelBoltffiIntegrationTests"
+        DIST_APPLE="$PROJECT_ROOT/siegel-boltffi/dist/apple"
+        XCFRAMEWORK="$DIST_APPLE/${SWIFT_MODULE}.xcframework"
+        # SwiftPM requires target paths inside the package directory, so the
+        # generated sources and the framework are copied in below rather than
+        # referenced across the repo.
+        COPY_SOURCES=2
+        BUILD_FLAG="--test-utils"
+        ;;
+    *) echo "Unknown binding '$BINDING' (expected: uniffi, boltffi)" >&2; exit 1 ;;
+esac
 
 # Disable color codes when the output isn't a TTY (e.g. CI logs).
 if [ -t 1 ] && [ "${NO_COLOR:-}" = "" ]; then
@@ -23,13 +52,37 @@ if ! xcodebuild -showsdks | grep -q 'iphonesimulator'; then
     exit 1
 fi
 
-echo "Step 1: building Swift bindings (sim-only — tests don't need device/Intel slices)"
-bash "$BASE_PATH/build_swift.sh" --sim-only
-[ -d "$BASE_PATH/${SWIFT_MODULE}.xcframework" ] || { echo "Missing XCFramework" >&2; exit 1; }
+echo "Step 1: building Swift bindings ($BINDING, sim-only — tests don't need device/Intel slices)"
+# Branch rather than expand an array: macOS ships bash 3.2, where expanding an
+# empty array under `set -u` is an error.
+if [ -n "$BUILD_FLAG" ]; then
+    bash "$BASE_PATH/$BUILD_SCRIPT" --sim-only "$BUILD_FLAG"
+else
+    bash "$BASE_PATH/$BUILD_SCRIPT" --sim-only
+fi
+[ -d "$XCFRAMEWORK" ] || { echo "Missing XCFramework at $XCFRAMEWORK" >&2; exit 1; }
 
-echo "Step 2: copying generated Swift sources into the test package"
-mkdir -p "$TESTS_PATH/$SOURCES_REL"
-cp "$BASE_PATH/$SOURCES_REL/${LIB_NAME}.swift" "$TESTS_PATH/$SOURCES_REL/${LIB_NAME}.swift"
+case "$COPY_SOURCES" in
+    1)
+        echo "Step 2: copying generated Swift sources into the test package"
+        mkdir -p "$TESTS_PATH/$SOURCES_REL"
+        cp "$BASE_PATH/$SOURCES_REL/${LIB_NAME}.swift" "$TESTS_PATH/$SOURCES_REL/${LIB_NAME}.swift"
+        ;;
+    2)
+        echo "Step 2: copying generated sources + framework into the test package"
+        rm -rf "${TESTS_PATH:?}/Sources" "${TESTS_PATH:?}/${SWIFT_MODULE}.xcframework"
+        mkdir -p "$TESTS_PATH/Sources"
+        # `pack apple` nests the generated Swift under Sources/BoltFFI, so copy
+        # the tree rather than globbing, matching the Package.swift it emits.
+        cp -R "$DIST_APPLE/Sources/." "$TESTS_PATH/Sources/"
+        if ! find "$TESTS_PATH/Sources" -name '*.swift' -print -quit | grep -q .; then
+            echo "No generated Swift under $DIST_APPLE/Sources — layout changed?" >&2
+            find "$DIST_APPLE" -maxdepth 3 | sed 's/^/  /' >&2
+            exit 1
+        fi
+        cp -R "$XCFRAMEWORK" "$TESTS_PATH/${SWIFT_MODULE}.xcframework"
+        ;;
+esac
 
 echo "Step 3: picking simulator"
 SIMULATOR_ID="$(xcrun simctl list devices available \
@@ -66,7 +119,7 @@ trap 'rm -f "$LOG_FILE"' EXIT
 set +e
 if [ "${VERBOSE:-0}" = "1" ]; then
     xcodebuild test \
-        -scheme SiegelIntegrationTests \
+        -scheme "$SCHEME" \
         -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
         -sdk iphonesimulator \
         CODE_SIGNING_ALLOWED=NO \
@@ -74,7 +127,7 @@ if [ "${VERBOSE:-0}" = "1" ]; then
     XCODE_STATUS=${PIPESTATUS[0]}
 else
     xcodebuild test \
-        -scheme SiegelIntegrationTests \
+        -scheme "$SCHEME" \
         -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
         -sdk iphonesimulator \
         CODE_SIGNING_ALLOWED=NO \
@@ -93,7 +146,7 @@ TOTAL=$((PASSED + FAILED))
 # Pull out per-suite results in source order. Print each test once.
 suite_lines=$(grep -E "Test Case .*( passed | failed )" "$LOG_FILE" || true)
 
-printf '\n%b===== Swift Test Results =====%b\n' "$BOLD" "$NC"
+printf '\n%b===== Swift Test Results (%s) =====%b\n' "$BOLD" "$BINDING" "$NC"
 if [ -n "$suite_lines" ]; then
     while IFS= read -r line; do
         # `'-[Module.Suite testName]' passed (0.001 seconds).`

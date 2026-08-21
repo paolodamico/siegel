@@ -30,7 +30,7 @@ The design focuses on making it harder to do unsafe behavior. For example, it ta
 - ✅ Bugs within the process where memory where the secret is stored is accidentally read.
 - ✅ Stale pointer dereferences the sealed secret (`PROT_NONE` segfaults)
 - ✔️ Secret swapped to disk (best effort; already not applicable on iOS).
-- ✅ UniFFI copies the secret into additional buffers for lowering/lifting which results in unzeroized copies of the secret.
+- ✅ `UniFFI` copies the secret into additional buffers for lowering/lifting which results in unzeroized copies of the secret.
 - ✅ Closure panics mid-operation. Secret is still zeroized as long as there is panic unwinding.
 - ✅ Makes accidental logging of secrets hard. Secret is only accessible within an explicit closure.
 

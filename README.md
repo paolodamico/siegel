@@ -21,6 +21,15 @@ For these use cases, Siegel provides a type-safe mechanism to loaad secrets into
 
 Siegel particularly focuses on secrets that must cross foreign boundaries. For example, if you have a zero-knowledge proof system relying on a secret stored in the device's keychain but the specific operations must be performed on the Rust side.
 
+## Foreign bindings
+
+Two binding crates wrap the same `siegel::session` core:
+
+| crate | generator |
+|-------|-----------|
+| [`siegel-boltffi`](siegel-boltffi/README.md) | [BoltFFI](https://boltffi.dev) |
+| [`siegel-uniffi`](siegel-uniffi/README.md) | [UniFFI](https://mozilla.github.io/uniffi-rs/) |
+
 ## Documentation
 
 See [docs.rs](https://docs.rs/siegel)

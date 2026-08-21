@@ -6,8 +6,12 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 mod protected;
 pub use protected::{ProtectedRegion, ProtectionError};
 
+#[cfg(feature = "session")]
+pub mod session;
+
+/// Test-only helpers shared by the binding crates. Not for production use.
 #[cfg(feature = "test-utils")]
-mod test_utils;
+pub mod test_utils;
 
 /// Container for a single secret in protected memory. Type safe.
 ///

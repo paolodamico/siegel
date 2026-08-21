@@ -1,5 +1,11 @@
+#![expect(
+    clippy::used_underscore_items,
+    reason = "boltffi's #[export] expansion references underscore-prefixed items"
+)]
+
 use std::sync::Arc;
 
+use boltffi::export;
 use siegel::session::{self, MAX_ACTIVE_SESSIONS, SessionCore};
 
 pub use siegel::session::{
@@ -7,34 +13,35 @@ pub use siegel::session::{
     FILL_ERR_WRONG_STATE, FILL_OK,
 };
 
-/// One-time secret-handling session, held by foreign code as
-/// `Arc<SiegelSession>`.
+/// One-time secret-handling session.
 ///
-/// Thin `UniFFI` wrapper over [`SessionCore`]
-#[derive(uniffi::Object)]
+/// Foreign code can fill the session through the raw path ([`siegel_fill_bolt`] on Apple,
+/// `SiegelNative.fillDirect` on the JVM).
+///
+/// # Thread safety
+///
+/// Confine a session to one thread. While the Rust-side is `Mutex`-guarded,
+/// a session is one-time use, racing a fill yields an arbitrary winner.
 pub struct SiegelSession(Arc<SessionCore>);
 
-#[uniffi::export]
+#[export]
 impl SiegelSession {
     /// Open a new session sized for `len` bytes.
-    ///
-    /// Foreign code retrieves [`SiegelSession::handle_id()`] and then
-    /// calls [`siegel_fill`] to write the bytes.
     ///
     /// # Errors
     ///
     /// `SessionError::InvalidLength` for `len == 0` or `len > 1 MiB`.
     /// `SessionError::TooManyActiveSessions` if the registry is at its cap.
     /// Allocation / protection / lock errors propagate from `siegel`.
-    #[uniffi::constructor]
-    pub fn new(len: u32) -> Result<Arc<Self>, SessionError> {
-        Ok(Arc::new(Self(SessionCore::new(len)?)))
+    pub fn new(len: u32) -> Result<Self, SessionError> {
+        Ok(Self(SessionCore::new(len)?))
     }
-}
 
-#[uniffi::export]
-impl SiegelSession {
-    /// Opaque identifier handle for [`siegel_fill`].
+    /// Opaque identifier handle for the raw fill path.
+    ///
+    /// Drawn from the OS CSPRNG to reduce the likelihood of
+    /// accidental access by non-expected callers. It is not an infallible
+    /// security guarantee. Stable for the lifetime of the session.
     #[must_use]
     pub fn handle_id(&self) -> u64 {
         self.0.handle_id()
@@ -42,7 +49,8 @@ impl SiegelSession {
 
     /// Capacity of the session in bytes.
     ///
-    /// Stable for the lifetime of the session.
+    /// Stable for the lifetime of the session. Callers can use this to
+    /// verify the session matches the size they expected before filling.
     #[must_use]
     #[expect(clippy::len_without_is_empty, reason = "sessions are always non-empty")]
     pub fn len(&self) -> u32 {
@@ -90,31 +98,38 @@ impl SiegelSession {
 ///
 /// Copies `len` bytes from `src` raw pointer into the session's siegel.
 ///
-/// This is the only function that crosses the foreign boundary outside
-/// of `UniFFI`. This exists to avoid the lowering behavior from `UniFFI` which
-/// creates a new buffer of the bytes in transit.
-///
 /// # Arguments
 /// - `handle`: the opaque handler received from [`SiegelSession::handle_id()`].
 /// - `src`: the raw pointer to the bytes to copy.
 /// - `len`: the size of the data.
 ///
 /// # Safety
-///
 /// - `src` **MUST** be valid for `len` bytes of read. This is the caller's responsibility.
 /// - The caller must not race fills against `read_once` or
 ///   `obliviate` on the same session.
+///
+/// # Rationale
+/// `BoltFFI` has special treatment for `&[u8]` lifted on Swift as `Data` (`ByteArray`) on Kotlin,
+/// this happens through a `writeBytes` function which creates a dangling copy (one more in `finalize`),
+/// i.e. dangling non-zeroized copies, what we want to avoid. We could go around this, e.g. using `i8`, but
+/// there's no guarantee this inner behavior won't change and we can't rely on that for security.
+///
+/// Reference: <https://github.com/boltffi/boltffi/blob/b33f1ae1b1e6a9ec5508143f5846afad10756ef4/boltffi_backend/templates/target/swift/wire.swift#L250>
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn siegel_fill(handle: u64, src: *const u8, len: usize) -> i32 {
+pub unsafe extern "C" fn siegel_fill_bolt(handle: u64, src: *const u8, len: usize) -> i32 {
     // SAFETY: forwarded verbatim; the caller upholds this function's contract.
     unsafe { session::fill_into(handle, src, len) }
 }
 
 /// Errors surfaced to foreign bindings.
 ///
-/// Mirrors [`siegel::session::SessionError`]
-#[derive(Debug, thiserror::Error, uniffi::Error)]
-#[uniffi(flat_error)]
+/// Mirrors [`siegel::session::SessionError`]. Declared here because each
+/// binding generator needs the error type in its own crate, and because the
+/// foreign-facing shape is binding-specific: `BoltFFI` carries struct-variant
+/// fields through to the generated exception as properties, where `UniFFI`
+/// flattens them to a message.
+#[derive(Debug, thiserror::Error)]
+#[boltffi::error]
 pub enum SessionError {
     #[error("requested length must be 1..=1Mb")]
     InvalidLength,
@@ -160,14 +175,12 @@ mod tests {
 
     use super::*;
 
-    fn fill(session: &Arc<SiegelSession>, bytes: &[u8]) -> i32 {
-        unsafe { siegel_fill(session.handle_id(), bytes.as_ptr(), bytes.len()) }
+    fn fill(session: &SiegelSession, bytes: &[u8]) -> i32 {
+        unsafe { siegel_fill_bolt(session.handle_id(), bytes.as_ptr(), bytes.len()) }
     }
 
-    /// The wrapper must forward the handle registered by the core, otherwise
-    /// `siegel_fill` would never resolve the session.
     #[test]
-    fn wrapper_handle_resolves_through_raw_fill() {
+    fn fill_then_consume_returns_digest() {
         let secret = vec![0x42; 16];
         let s = SiegelSession::new(16).unwrap();
         assert_eq!(fill(&s, &secret), FILL_OK);
@@ -186,11 +199,33 @@ mod tests {
 
     #[test]
     fn constructor_errors_map_to_binding_error() {
-        // `matches!` rather than `unwrap_err`: the Ok variant is
-        // `Arc<SiegelSession>`, which is deliberately not `Debug`.
         assert!(matches!(
             SiegelSession::new(0),
             Err(SessionError::InvalidLength)
+        ));
+    }
+
+    #[test]
+    fn fill_rejects_wrong_length() {
+        let s = SiegelSession::new(16).unwrap();
+        assert_eq!(fill(&s, &[0u8; 8]), FILL_ERR_LEN_MISMATCH);
+        // The session stays usable after a rejected fill.
+        assert_eq!(fill(&s, &[1u8; 16]), FILL_OK);
+    }
+
+    #[test]
+    fn fill_rejects_double_fill() {
+        let s = SiegelSession::new(8).unwrap();
+        assert_eq!(fill(&s, &[1u8; 8]), FILL_OK);
+        assert_eq!(fill(&s, &[1u8; 8]), FILL_ERR_WRONG_STATE);
+    }
+
+    #[test]
+    fn read_once_rejects_unfilled_session() {
+        let s = SiegelSession::new(8).unwrap();
+        assert!(matches!(
+            s.read_once(<[u8]>::to_vec),
+            Err(SessionError::InvalidState)
         ));
     }
 
@@ -204,15 +239,15 @@ mod tests {
         assert!(s.is_consumed());
     }
 
-    /// Dropping the foreign-held `Arc` must drop the inner `SessionCore` and
-    /// evict its registry entry, or handles would leak across the boundary.
+    /// Dropping the wrapper must drop the inner `SessionCore` and evict its
+    /// registry entry, or handles would leak across the boundary.
     #[test]
     fn dropping_wrapper_invalidates_handle() {
         let handle = {
             let s = SiegelSession::new(8).unwrap();
             s.handle_id()
         };
-        let rc = unsafe { siegel_fill(handle, [0u8; 8].as_ptr(), 8) };
+        let rc = unsafe { session::fill_into(handle, [0u8; 8].as_ptr(), 8) };
         assert_eq!(rc, FILL_ERR_INVALID_HANDLE);
     }
 }

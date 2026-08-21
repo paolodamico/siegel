@@ -16,18 +16,15 @@ crate-type = ["lib", "staticlib", "cdylib"]
 [features]
 # Exposes `sha256_consume` to foreign bindings. Used by the Swift / Kotlin
 # integration test suites to drive `read_once` end-to-end. Not for production use.
-test-utils = ["dep:sha2", "dep:libc", "siegel/test-utils"]
+test-utils = ["dep:sha2", "siegel/test-utils"]
 # additional intermediate logging useful for debugging and security information
-tracing = ["dep:tracing"]
+tracing = ["siegel/tracing"]
 
 [dependencies]
-siegel = { workspace = true }
+siegel = { workspace = true, features = ["session"] }
 thiserror = { workspace = true }
 uniffi = { workspace = true }
-getrandom = "0.4"
-libc = { version = "0.2", optional = true } # `libc` is only used by the `test_utils`
 sha2 = { version = "0.10", optional = true }
-tracing = { version = "0.1", optional = true, default-features = false }
 
 [dev-dependencies]
 sha2 = "0.10"

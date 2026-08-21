@@ -1,0 +1,8 @@
+# CI overlay: `boltffi pack apple --overlay boltffi.ci.toml`
+#
+# Narrows the Apple build to the simulator slice the runner can actually load,
+# do NOT use for production builds.
+
+[targets.apple]
+ios_architectures = []
+simulator_architectures = ["arm64"]
