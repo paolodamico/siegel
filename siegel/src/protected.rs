@@ -291,9 +291,9 @@ enum Protection {
 ///
 /// Used by `with_read` / `with_write`. On the success path, callers
 /// invoke `finish()` to re-seal explicitly and propagate any `mprotect`
-/// failure as `ProtectionError::Mprotect`. The `Drop` path is reached
-/// during unwind from a closure panic, where it re-seals
-/// best-effort.
+/// failure as `ProtectionError::Mprotect`. `Drop` re-seals best-effort: during
+/// unwind from a closure panic, and after `finish()` too, which retries a failed
+/// reseal.
 struct ResealOnDrop<'a> {
     region: &'a mut ProtectedRegion,
 }

@@ -299,7 +299,8 @@ pub const TAKE_ERR_CANARY: i32 = -6;
 ///
 /// # Safety
 ///
-/// - `dst` **MUST** be valid for `len` bytes of write.
+/// - `dst` **MUST** be valid for reads and writes of `len` bytes, and not accessed
+///   elsewhere until the call returns.
 /// - `dst` must not overlap the session's protected memory.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siegel_take(handle: u64, dst: *mut u8, len: usize) -> i32 {
@@ -338,7 +339,7 @@ pub unsafe extern "C" fn siegel_take(handle: u64, dst: *mut u8, len: usize) -> i
 
     // A failed reseal surfaces after the copy ran, so wipe `dst` with writes the
     // compiler can't drop. `MaybeUninit` because on other errors `dst` was never written.
-    // SAFETY: the caller guarantees `dst` is valid for `len` bytes of write.
+    // SAFETY: the caller guarantees `dst` is valid and ours alone for `len` bytes.
     unsafe { std::slice::from_raw_parts_mut(dst.cast::<std::mem::MaybeUninit<u8>>(), len) }
         .zeroize();
 

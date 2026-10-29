@@ -22,6 +22,8 @@ zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 sha2 = "0.10"
+# Self-reference so unit tests can use the `test-utils` reseal-failure hook.
+siegel = { path = ".", features = ["test-utils"] }
 
 [lints]
 workspace = true
