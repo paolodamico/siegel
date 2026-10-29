@@ -36,12 +36,18 @@ private func fill(_ session: SiegelSession, _ bytes: [UInt8]) -> Int32 {
     }
 }
 
+// `siegel_take` into a native buffer, returning the code and a copy of the bytes for
+// assertions. Like an app must, it zeroizes the buffer once done (`memset_s`, which the
+// compiler can't drop) before freeing it.
 private func take(_ session: SiegelSession, _ len: Int) -> (Int32, [UInt8]) {
-    var out = [UInt8](repeating: SENTINEL, count: len)
-    let rc = out.withUnsafeMutableBufferPointer { buf in
-        siegel_take(session.handleId(), buf.baseAddress, buf.count)
+    let buf = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: len)
+    defer {
+        _ = memset_s(buf.baseAddress, len, 0, len)
+        buf.deallocate()
     }
-    return (rc, out)
+    buf.initialize(repeating: SENTINEL)
+    let rc = siegel_take(session.handleId(), buf.baseAddress, len)
+    return (rc, Array(buf))
 }
 
 final class SiegelSessionTests: XCTestCase {

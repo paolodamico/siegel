@@ -59,15 +59,20 @@ private fun fill(session: SiegelSession, bytes: ByteArray): Int {
     return RAW.siegel_fill(session.handleId().toLong(), mem, bytes.size.toLong())
 }
 
-/** Helper: call `siegel_take` into native memory, returning the code and the bytes. */
-private fun take(session: SiegelSession, len: Int): Pair<Int, ByteArray> {
-    val mem = Memory(len.toLong())
-    mem.setMemory(0, len.toLong(), SENTINEL)
-    val rc = RAW.siegel_take(session.handleId().toLong(), mem, len.toLong())
-    val bytes = mem.getByteArray(0, len)
-    mem.clear()
-    return rc to bytes
-}
+/**
+ * Helper: `siegel_take` into native memory, returning the code and a copy of the bytes for
+ * assertions. Like an app must, it zeroizes the native buffer once done, before freeing it.
+ */
+private fun take(session: SiegelSession, len: Int): Pair<Int, ByteArray> =
+    Memory(len.toLong()).use { mem ->
+        try {
+            mem.setMemory(0, len.toLong(), SENTINEL)
+            val rc = RAW.siegel_take(session.handleId().toLong(), mem, len.toLong())
+            rc to mem.getByteArray(0, len)
+        } finally {
+            mem.clear()
+        }
+    }
 
 private fun bytesOf(value: Byte, len: Int): ByteArray = ByteArray(len) { value }
 
