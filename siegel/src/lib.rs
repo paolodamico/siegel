@@ -9,6 +9,8 @@ pub use protected::{ProtectedRegion, ProtectionError};
 
 #[cfg(feature = "test-utils")]
 mod test_utils;
+#[cfg(feature = "test-utils")]
+pub use test_utils::fail_next_reseal;
 
 /// Container for a single secret in protected memory. Type safe.
 ///

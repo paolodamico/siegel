@@ -214,6 +214,12 @@ impl ProtectedRegion {
     ///
     /// `ProtectionError::Mprotect` if the underlying syscall fails.
     fn mprotect_noaccess(&mut self) -> Result<(), ProtectionError> {
+        #[cfg(feature = "test-utils")]
+        if crate::test_utils::take_reseal_failure() {
+            return Err(ProtectionError::Mprotect(io::Error::from_raw_os_error(
+                libc::ENOMEM,
+            )));
+        }
         mprotect(self.data, self.data_pages_len, Protection::NoAccess)?;
         self.protection = Protection::NoAccess;
         Ok(())

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, Weak};
 
 use siegel::{Empty, Loaded, Siegel, SiegelError};
+use zeroize::Zeroize;
 
 /// Type for the global registry of handles.
 ///
@@ -335,9 +336,10 @@ pub unsafe extern "C" fn siegel_take(handle: u64, dst: *mut u8, len: usize) -> i
         return TAKE_OK;
     };
 
-    // A failed reseal surfaces after the copy ran, so wipe `dst`.
+    // A failed reseal surfaces after the copy ran, so wipe `dst` with writes
+    // the compiler can't drop.
     // SAFETY: as for the copy above.
-    unsafe { std::ptr::write_bytes(dst, 0, len) };
+    unsafe { std::slice::from_raw_parts_mut(dst, len) }.zeroize();
 
     #[cfg(feature = "tracing")]
     tracing::error!(target: "siegel", error = %e, "siegel_take failed; destination wiped");
@@ -790,8 +792,6 @@ mod tests {
 
     #[test]
     fn take_reports_canary_corruption_and_consumes() {
-        use zeroize::Zeroize;
-
         let s = written(&[0xEE; 8]);
         // Zeroizing wipes the canary along with the data.
         if let SessionState::Written(siegel) = &mut *lock_state(&s.state) {
@@ -800,6 +800,16 @@ mod tests {
         let mut out = [SENTINEL; 8];
         assert_eq!(take(&s, &mut out), TAKE_ERR_CANARY);
         assert_eq!(out, [0u8; 8], "dst must be wiped on a failed take");
+        assert!(s.is_consumed());
+    }
+
+    #[test]
+    fn take_wipes_dst_when_reseal_fails_after_copy() {
+        let s = written(&[0xC3; 8]);
+        let mut out = [SENTINEL; 8];
+        siegel::fail_next_reseal();
+        assert_eq!(take(&s, &mut out), TAKE_ERR_PROTECTION);
+        assert_eq!(out, [0u8; 8], "the copied secret must be wiped");
         assert!(s.is_consumed());
     }
 

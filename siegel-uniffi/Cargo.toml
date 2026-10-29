@@ -28,10 +28,12 @@ getrandom = "0.4"
 libc = { version = "0.2", optional = true } # `libc` is only used by the `test_utils`
 sha2 = { version = "0.10", optional = true }
 tracing = { version = "0.1", optional = true, default-features = false }
+zeroize = "1"
 
 [dev-dependencies]
 sha2 = "0.10"
-zeroize = "1"
+# `test-utils` lets session tests inject a reseal failure.
+siegel = { workspace = true, features = ["test-utils"] }
 
 [lints]
 workspace = true
