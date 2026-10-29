@@ -1,6 +1,7 @@
 //! Helpers for integration tests.
 
 use std::io;
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
@@ -23,6 +24,30 @@ pub fn sha256_consume(session: &SiegelSession) -> Result<Vec<u8>, SessionError> 
         h.update(bytes);
         h.finalize().to_vec()
     })
+}
+
+/// Consume the session and return a new session loaded with SHA-256 of
+/// its bytes, for foreign code to take with `siegel_take`.
+///
+/// Mirrors the shape of a real application call producing a secret output.
+///
+/// # Warning
+/// Only for integration tests.
+///
+/// # Errors
+/// - `SessionError::InvalidState` if the input session hasn't been filled.
+/// - `SessionError::Consumed` if the input session was already consumed.
+/// - Allocation / protection errors for the output session.
+#[uniffi::export]
+pub fn sha256_reseal(input: &SiegelSession) -> Result<Arc<SiegelSession>, SessionError> {
+    let output = SiegelSession::new(32)?;
+    input.read_once(|bytes| {
+        output.write_once(|buf| {
+            buf.copy_from_slice(&Sha256::digest(bytes));
+            Ok::<_, SessionError>(())
+        })
+    })??;
+    Ok(output)
 }
 
 /// Sentinel return values for the segfault helpers.

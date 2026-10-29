@@ -11,17 +11,34 @@ import XCTest
 @_silgen_name("siegel_fill")
 private func siegel_fill(_ handle: UInt64, _ src: UnsafePointer<UInt8>?, _ len: Int) -> Int32
 
+// `siegel_take` is the reverse: `i32 siegel_take(u64, *mut u8, usize)`.
+@_silgen_name("siegel_take")
+private func siegel_take(_ handle: UInt64, _ dst: UnsafeMutablePointer<UInt8>?, _ len: Int) -> Int32
+
 // Match the constants exported from `siegel-uniffi::session`.
 private let FILL_OK: Int32 = 0
 private let FILL_ERR_INVALID_HANDLE: Int32 = -1
 private let FILL_ERR_LEN_MISMATCH: Int32 = -2
 private let FILL_ERR_NULL_SRC: Int32 = -3
 private let FILL_ERR_WRONG_STATE: Int32 = -4
+private let TAKE_OK: Int32 = 0
+private let TAKE_ERR_INVALID_HANDLE: Int32 = -1
+private let TAKE_ERR_LEN_MISMATCH: Int32 = -2
+private let TAKE_ERR_NULL_DST: Int32 = -3
+private let TAKE_ERR_WRONG_STATE: Int32 = -4
 
 private func fill(_ session: SiegelSession, _ bytes: [UInt8]) -> Int32 {
     bytes.withUnsafeBufferPointer { buf in
         siegel_fill(session.handleId(), buf.baseAddress, buf.count)
     }
+}
+
+private func take(_ session: SiegelSession, _ len: Int) -> (Int32, [UInt8]) {
+    var out = [UInt8](repeating: 0, count: len)
+    let rc = out.withUnsafeMutableBufferPointer { buf in
+        siegel_take(session.handleId(), buf.baseAddress, buf.count)
+    }
+    return (rc, out)
 }
 
 final class SiegelSessionTests: XCTestCase {
@@ -147,5 +164,88 @@ final class SiegelSessionTests: XCTestCase {
             siegel_fill(handle, buf.baseAddress, buf.count)
         }
         XCTAssertEqual(rc, FILL_ERR_INVALID_HANDLE)
+    }
+
+    func testResealThenTakeReturnsSha256() throws {
+        let secret = [UInt8](repeating: 0x42, count: 16)
+        let input = try SiegelSession(len: 16)
+        XCTAssertEqual(fill(input, secret), FILL_OK)
+
+        let output = try sha256Reseal(input: input)
+        XCTAssertTrue(input.isConsumed())
+        XCTAssertFalse(output.isConsumed())
+        XCTAssertEqual(output.len(), 32)
+
+        let (rc, digest) = take(output, 32)
+        let expected = [UInt8](SHA256.hash(data: Data(secret)))
+
+        XCTAssertEqual(rc, TAKE_OK)
+        XCTAssertEqual(digest, expected)
+        XCTAssertTrue(output.isConsumed())
+    }
+
+    func testWrittenSessionCanBePassedBackIntoRust() throws {
+        let secret = [UInt8](repeating: 0x42, count: 16)
+        let input = try SiegelSession(len: 16)
+        XCTAssertEqual(fill(input, secret), FILL_OK)
+        let output = try sha256Reseal(input: input)
+
+        let digest = try sha256Consume(session: output)
+        let expected = Data(SHA256.hash(data: Data(SHA256.hash(data: Data(secret)))))
+
+        XCTAssertEqual(digest, expected)
+        XCTAssertEqual(take(output, 32).0, TAKE_ERR_WRONG_STATE)
+    }
+
+    func testTakeRejectsNullDst() throws {
+        let input = try SiegelSession(len: 8)
+        XCTAssertEqual(fill(input, [UInt8](repeating: 1, count: 8)), FILL_OK)
+        let output = try sha256Reseal(input: input)
+        XCTAssertEqual(siegel_take(output.handleId(), nil, 32), TAKE_ERR_NULL_DST)
+        XCTAssertFalse(output.isConsumed())
+    }
+
+    func testTakeRejectsUnknownHandle() {
+        var out = [UInt8](repeating: 0, count: 4)
+        let rc = out.withUnsafeMutableBufferPointer { buf in
+            siegel_take(0xDEAD, buf.baseAddress, buf.count)
+        }
+        XCTAssertEqual(rc, TAKE_ERR_INVALID_HANDLE)
+    }
+
+    func testTakeRejectsLengthMismatchAndRecovers() throws {
+        let input = try SiegelSession(len: 8)
+        XCTAssertEqual(fill(input, [UInt8](repeating: 2, count: 8)), FILL_OK)
+        let output = try sha256Reseal(input: input)
+        XCTAssertEqual(take(output, 16).0, TAKE_ERR_LEN_MISMATCH)
+        // Session is still takeable with a correctly sized buffer.
+        XCTAssertEqual(take(output, 32).0, TAKE_OK)
+    }
+
+    func testTakeBeforeWriteIsRejected() throws {
+        let session = try SiegelSession(len: 8)
+        XCTAssertEqual(take(session, 8).0, TAKE_ERR_WRONG_STATE)
+        XCTAssertFalse(session.isConsumed())
+    }
+
+    func testSecondTakeIsRejected() throws {
+        let input = try SiegelSession(len: 8)
+        XCTAssertEqual(fill(input, [UInt8](repeating: 3, count: 8)), FILL_OK)
+        let output = try sha256Reseal(input: input)
+        XCTAssertEqual(take(output, 32).0, TAKE_OK)
+
+        let (rc, bytes) = take(output, 32)
+        XCTAssertEqual(rc, TAKE_ERR_WRONG_STATE)
+        XCTAssertEqual(bytes, [UInt8](repeating: 0, count: 32))
+    }
+
+    func testResealRejectsEmptyInput() throws {
+        let input = try SiegelSession(len: 8)
+        XCTAssertThrowsError(try sha256Reseal(input: input)) { error in
+            guard case SessionError.InvalidState = error else {
+                return XCTFail("expected InvalidState, got \(error)")
+            }
+        }
+        XCTAssertFalse(input.isConsumed())
     }
 }

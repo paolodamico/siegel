@@ -54,7 +54,7 @@ impl Siegel<Empty> {
     ///
     /// `SiegelError::LengthMismatch` if `bytes.len()` doesn't equal the
     /// siegel's capacity. Protection errors propagate.
-    pub fn write(mut self, bytes: &[u8]) -> Result<Siegel<Loaded>, SiegelError> {
+    pub fn write(self, bytes: &[u8]) -> Result<Siegel<Loaded>, SiegelError> {
         let expected = self.region.len();
         if bytes.len() != expected {
             return Err(SiegelError::LengthMismatch {
@@ -62,11 +62,30 @@ impl Siegel<Empty> {
                 got: bytes.len(),
             });
         }
-        self.region.with_write(|buf| buf.copy_from_slice(bytes))?;
-        Ok(Siegel {
+        let (loaded, ()) = self.write_with(|buf| buf.copy_from_slice(bytes))?;
+        Ok(loaded)
+    }
+
+    /// Unseal, run `f` with `&mut [u8]` of the full capacity, then seal.
+    /// This method consumes the `Siegel` and returns a "Loaded" Siegel
+    /// alongside whatever the closure produces.
+    ///
+    /// Lets a secret be computed directly into protected memory instead of
+    /// being staged in an intermediate buffer and copied with [`write`](Self::write).
+    /// The buffer starts zeroed; bytes `f` doesn't touch stay zero.
+    ///
+    /// # Errors
+    /// - Protection errors.
+    pub fn write_with<T, F>(mut self, f: F) -> Result<(Siegel<Loaded>, T), SiegelError>
+    where
+        F: FnOnce(&mut [u8]) -> T,
+    {
+        let result = self.region.with_write(f)?;
+        let loaded = Siegel {
             region: self.region,
             _state: PhantomData,
-        })
+        };
+        Ok((loaded, result))
     }
 }
 
@@ -193,6 +212,21 @@ mod tests {
             }) => {}
             Err(other) => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn write_with_computes_into_protected_memory() {
+        let empty: Siegel<Empty> = Siegel::new(32).unwrap();
+        let (loaded, untouched_was_zero) = empty
+            .write_with(|buf| {
+                let was_zero = buf.iter().all(|&b| b == 0);
+                buf.copy_from_slice(&Sha256::digest(b"seed"));
+                was_zero
+            })
+            .unwrap();
+        assert!(untouched_was_zero);
+        let copy = loaded.read_once(<[u8]>::to_vec).unwrap();
+        assert_eq!(copy, Sha256::digest(b"seed").to_vec());
     }
 
     #[test]
