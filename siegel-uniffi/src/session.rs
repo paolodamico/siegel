@@ -34,9 +34,9 @@ const MAX_HANDLE_ALLOC_RETRIES: u8 = 8;
 /// [`siegel_fill`] writes bytes into the empty siegel and transitions
 /// the state to `Filled`; [`read_once`](Self::read_once)
 /// runs the application operation against the loaded siegel and wipes.
-/// In the other direction, [`write_once`](Self::write_once) has Rust write
-/// the secret (`Written`) and [`siegel_take`] copies it out to foreign memory
-/// and wipes. Only a `Written` secret can be taken.
+/// In the other direction, [`new_written`](Self::new_written) opens a session
+/// holding a secret Rust wrote (`Written`) and [`siegel_take`] copies it out to
+/// foreign memory and wipes. Only a `Written` secret can be taken.
 #[derive(uniffi::Object)]
 pub struct SiegelSession {
     state: Mutex<SessionState>,
@@ -52,8 +52,8 @@ impl SiegelSession {
     /// Foreign code retrieves [`SiegelSession::handle_id()`], calls [`siegel_fill`]
     /// to write the bytes, then calls the application's `#[uniffi::export]`
     /// function (which internally invokes [`SiegelSession::read_once`]).
-    /// For a secret output, Rust code opens the session, fills it with
-    /// [`SiegelSession::write_once`] and returns it; foreign code then calls [`siegel_take`].
+    /// For a secret output, Rust code opens the session with
+    /// [`SiegelSession::new_written`] and returns it; foreign code then calls [`siegel_take`].
     ///
     /// # Errors
     ///
@@ -150,7 +150,7 @@ impl SiegelSession {
     /// used once.
     ///
     /// # Errors
-    /// - `InvalidState` if the session hasn't been filled.
+    /// - `InvalidState` if the session holds no secret yet.
     /// - `Consumed` if already consumed.
     /// - OS-level memory errors.
     pub fn read_once<T, F>(&self, f: F) -> Result<T, SessionError>
@@ -172,40 +172,38 @@ impl SiegelSession {
         loaded.read_once(f).map_err(SessionError::from)
     }
 
-    /// Writes the secret once by running `f` against the session's
-    /// protected memory, so a secret output can be handed back to foreign
-    /// code via [`siegel_take`] without crossing `UniFFI`'s byte copies.
+    /// Opens a session of `len` bytes holding a secret Rust computes, so a
+    /// secret output can be handed back to foreign code via [`siegel_take`]
+    /// without crossing `UniFFI`'s byte copies.
     ///
-    /// `f` gets the full capacity, zeroed, and its result is returned as the
-    /// inner `Result`. If `f` returns `Err` the bytes are zeroized and the
-    /// session is consumed, so a partial output can never be taken. The
-    /// session's lock is held while `f` runs; `f` must not call back into
-    /// this session.
+    /// `f` writes the secret straight into the session's protected memory and
+    /// gets the full capacity, zeroed. The session only exists once `f`
+    /// succeeds, so nothing else can reach it meanwhile. If `f` returns `Err`,
+    /// the bytes are zeroized and that error is returned as the inner `Result`.
     ///
     /// # Errors
-    /// - `InvalidState` if the session is already loaded.
-    /// - `Consumed` if already consumed.
+    /// - Same as [`SiegelSession::new`].
     /// - OS-level memory errors.
-    pub fn write_once<T, E, F>(&self, f: F) -> Result<Result<T, E>, SessionError>
+    pub fn new_written<E, F>(len: u32, f: F) -> Result<Result<Arc<Self>, E>, SessionError>
     where
-        F: FnOnce(&mut [u8]) -> Result<T, E>,
+        F: FnOnce(&mut [u8]) -> Result<(), E>,
     {
-        let mut state = lock_state(&self.state);
-        let empty = match std::mem::replace(&mut *state, SessionState::Consumed) {
-            SessionState::Empty(s) => s,
-            loaded @ (SessionState::Filled(_) | SessionState::Written(_)) => {
-                *state = loaded;
-                return Err(SessionError::InvalidState);
-            }
-            SessionState::Consumed => return Err(SessionError::Consumed),
+        let session = Self::new(len)?;
+        let mut state = lock_state(&session.state);
+        let SessionState::Empty(empty) = std::mem::replace(&mut *state, SessionState::Consumed)
+        else {
+            // `session` was opened just above and hasn't been shared.
+            return Err(SessionError::InvalidState);
         };
 
-        let (loaded, result) = empty.write_with(f)?;
-        // On a closure error `loaded` is dropped (zeroized) and the session stays Consumed.
-        if result.is_ok() {
-            *state = SessionState::Written(loaded);
+        let (written, result) = empty.write_with(f)?;
+        if let Err(e) = result {
+            // `written` and the unshared session drop here, zeroized.
+            return Ok(Err(e));
         }
-        Ok(result)
+        *state = SessionState::Written(written);
+        drop(state);
+        Ok(Ok(session))
     }
 }
 
@@ -295,7 +293,7 @@ pub const TAKE_ERR_CANARY: i32 = -6;
 ///
 /// Copies the session's `len` loaded bytes into `dst`, then zeroizes the
 /// siegel and consumes the session. The mirror of [`siegel_fill`] for
-/// secrets Rust produced with [`SiegelSession::write_once`]. A secret
+/// secrets Rust produced with [`SiegelSession::new_written`]. A secret
 /// foreign code filled with [`siegel_fill`] can't be taken back out
 /// (`TAKE_ERR_WRONG_STATE`).
 ///
@@ -303,8 +301,8 @@ pub const TAKE_ERR_CANARY: i32 = -6;
 /// returned bytes through intermediate buffers that are never zeroized.
 /// The caller owns `dst` and is responsible for zeroizing it.
 ///
-/// On [`TAKE_ERR_CANARY`] and [`TAKE_ERR_PROTECTION`], `dst` is zeroed because
-/// the failure can surface after the copy. Every other error leaves `dst` untouched.
+/// On [`TAKE_ERR_CANARY`] and [`TAKE_ERR_PROTECTION`], `dst` is zeroed (a failed
+/// reseal only surfaces after the copy). Every other error leaves `dst` untouched.
 ///
 /// # Arguments
 /// - `handle`: the opaque handler received from [`SiegelSession::handle_id()`].
@@ -373,7 +371,7 @@ enum SessionState {
     Empty(Siegel<Empty>),
     /// Loaded by foreign code through [`siegel_fill`]. Readable by Rust only.
     Filled(Siegel<Loaded>),
-    /// Loaded by Rust through [`SiegelSession::write_once`]. Readable by Rust or [`siegel_take`].
+    /// Loaded by Rust through [`SiegelSession::new_written`]. Readable by Rust or [`siegel_take`].
     Written(Siegel<Loaded>),
     Consumed,
 }
@@ -483,12 +481,17 @@ mod tests {
         unsafe { siegel_take(session.handle_id(), dst.as_mut_ptr(), dst.len()) }
     }
 
-    fn write(session: &Arc<SiegelSession>, bytes: &[u8]) -> Result<(), SessionError> {
-        let Ok(()) = session.write_once(|buf| {
+    /// Arbitrary non-secret bytes; error paths must leave `dst` holding these.
+    const SENTINEL: u8 = 0xA5;
+
+    fn written(bytes: &[u8]) -> Arc<SiegelSession> {
+        let len = u32::try_from(bytes.len()).unwrap();
+        let Ok(session) = SiegelSession::new_written(len, |buf| {
             buf.copy_from_slice(bytes);
             Ok::<_, Infallible>(())
-        })?;
-        Ok(())
+        })
+        .unwrap();
+        session
     }
 
     #[test]
@@ -629,31 +632,23 @@ mod tests {
     }
 
     #[test]
-    fn write_then_take_round_trips() {
-        let s = SiegelSession::new(32).unwrap();
-        let Ok(public) = s
-            .write_once(|buf| {
-                buf.copy_from_slice(&Sha256::digest(b"seed"));
-                Ok::<_, Infallible>("public half")
-            })
-            .unwrap();
-        assert_eq!(public, "public half");
+    fn written_then_take_round_trips() {
+        let s = written(&Sha256::digest(b"seed"));
+        assert_eq!(s.len(), 32);
         assert!(!s.is_consumed());
 
-        let mut out = [0u8; 32];
+        let mut out = [SENTINEL; 32];
         assert_eq!(take(&s, &mut out), TAKE_OK);
         assert_eq!(out.to_vec(), Sha256::digest(b"seed").to_vec());
         assert!(s.is_consumed());
     }
 
     #[test]
-    fn read_once_can_chain_into_write_once() {
+    fn read_once_can_chain_into_new_written() {
         let input = SiegelSession::new(16).unwrap();
         assert_eq!(fill(&input, &[0x42; 16]), FILL_OK);
-        let output = SiegelSession::new(32).unwrap();
-        input
-            .read_once(|seed| write(&output, &Sha256::digest(seed)))
-            .unwrap()
+        let output = input
+            .read_once(|seed| written(&Sha256::digest(seed)))
             .unwrap();
         assert!(input.is_consumed());
 
@@ -662,70 +657,38 @@ mod tests {
     }
 
     /// The closure's error comes back as the inner `Result`, so an error
-    /// from a nested session can't be mistaken for this session's own.
+    /// from a nested session can't be mistaken for the new session's own.
     #[test]
-    fn write_once_closure_error_consumes_session() {
+    fn new_written_returns_closure_error_and_no_session() {
         let input = SiegelSession::new(8).unwrap();
-        let output = SiegelSession::new(8).unwrap();
-        let inner = output
-            .write_once(|buf| {
-                buf.fill(0xAA);
-                input.read_once(|seed| buf.copy_from_slice(seed))
-            })
-            .unwrap();
+        let inner = SiegelSession::new_written(8, |buf| {
+            buf.fill(0xAA);
+            input.read_once(|seed| buf.copy_from_slice(seed))
+        })
+        .unwrap();
         assert!(matches!(inner, Err(SessionError::InvalidState)));
         assert!(!input.is_consumed());
-        assert!(output.is_consumed());
-        assert_eq!(take(&output, &mut [0u8; 8]), TAKE_ERR_WRONG_STATE);
     }
 
     #[test]
-    fn write_once_rejects_consumed_session() {
-        let s = SiegelSession::new(8).unwrap();
-        s.obliviate();
-        let err = write(&s, &[1u8; 8]).unwrap_err();
-        assert!(matches!(err, SessionError::Consumed));
-    }
-
-    #[test]
-    fn write_once_rejects_loaded_session() {
-        let s = SiegelSession::new(8).unwrap();
-        assert_eq!(fill(&s, &[1u8; 8]), FILL_OK);
-        let err = write(&s, &[2u8; 8]).unwrap_err();
-        assert!(matches!(err, SessionError::InvalidState));
-        // The filled secret is left intact.
-        assert_eq!(s.read_once(<[u8]>::to_vec).unwrap(), vec![1u8; 8]);
-
-        let s = SiegelSession::new(8).unwrap();
-        write(&s, &[3u8; 8]).unwrap();
-        let err = write(&s, &[4u8; 8]).unwrap_err();
-        assert!(matches!(err, SessionError::InvalidState));
-        assert_eq!(s.read_once(<[u8]>::to_vec).unwrap(), vec![3u8; 8]);
-    }
-
-    #[test]
-    fn write_once_panic_consumes_session() {
-        let s = SiegelSession::new(8).unwrap();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            s.write_once(|_| -> Result<(), SessionError> {
-                std::panic::resume_unwind(Box::new("derivation panicked"))
-            })
-        }));
-        assert!(result.is_err());
-        assert!(s.is_consumed());
+    fn new_written_rejects_zero_length() {
+        let result = SiegelSession::new_written(0, |_| Ok::<_, Infallible>(()));
+        assert!(matches!(result, Err(SessionError::InvalidLength)));
     }
 
     #[test]
     fn fill_rejects_written_session() {
-        let s = SiegelSession::new(8).unwrap();
-        write(&s, &[3u8; 8]).unwrap();
+        let s = written(&[3u8; 8]);
         assert_eq!(fill(&s, &[4u8; 8]), FILL_ERR_WRONG_STATE);
+        // The written secret survives the rejected fill.
+        let mut out = [SENTINEL; 8];
+        assert_eq!(take(&s, &mut out), TAKE_OK);
+        assert_eq!(out, [3u8; 8]);
     }
 
     #[test]
     fn take_rejects_null_dst() {
-        let s = SiegelSession::new(8).unwrap();
-        write(&s, &[5u8; 8]).unwrap();
+        let s = written(&[5u8; 8]);
         let rc = unsafe { siegel_take(s.handle_id(), std::ptr::null_mut(), 8) };
         assert_eq!(rc, TAKE_ERR_NULL_DST);
         assert!(!s.is_consumed());
@@ -733,19 +696,19 @@ mod tests {
 
     #[test]
     fn take_rejects_unknown_handle() {
-        let mut out = [0u8; 8];
+        let mut out = [SENTINEL; 8];
         let rc = unsafe { siegel_take(127, out.as_mut_ptr(), 8) };
         assert_eq!(rc, TAKE_ERR_INVALID_HANDLE);
+        assert_eq!(out, [SENTINEL; 8]);
     }
 
     #[test]
     fn take_rejects_wrong_length_and_recovers() {
-        let s = SiegelSession::new(16).unwrap();
-        write(&s, &[6u8; 16]).unwrap();
-        let mut short = [0u8; 8];
+        let s = written(&[6u8; 16]);
+        let mut short = [SENTINEL; 8];
         assert_eq!(take(&s, &mut short), TAKE_ERR_LEN_MISMATCH);
-        assert_eq!(short, [0u8; 8]);
-        let mut out = [0u8; 16];
+        assert_eq!(short, [SENTINEL; 8]);
+        let mut out = [SENTINEL; 16];
         assert_eq!(take(&s, &mut out), TAKE_OK);
         assert_eq!(out, [6u8; 16]);
     }
@@ -756,17 +719,16 @@ mod tests {
     fn take_rejects_filled_session() {
         let s = SiegelSession::new(8).unwrap();
         assert_eq!(fill(&s, &[0x5E; 8]), FILL_OK);
-        let mut out = [0u8; 8];
+        let mut out = [SENTINEL; 8];
         assert_eq!(take(&s, &mut out), TAKE_ERR_WRONG_STATE);
-        assert_eq!(out, [0u8; 8]);
+        assert_eq!(out, [SENTINEL; 8]);
         assert_eq!(s.read_once(<[u8]>::to_vec).unwrap(), vec![0x5E; 8]);
     }
 
     #[test]
     fn concurrent_takes_succeed_exactly_once() {
         const THREADS: usize = 8;
-        let s = SiegelSession::new(8).unwrap();
-        write(&s, &[0x5A; 8]).unwrap();
+        let s = written(&[0x5A; 8]);
         let handle = s.handle_id();
         let barrier = Arc::new(std::sync::Barrier::new(THREADS));
 
@@ -776,7 +738,7 @@ mod tests {
             // Odd threads race a wrong-length take against the real ones.
             let len = if i % 2 == 0 { 8 } else { 4 };
             threads.push(std::thread::spawn(move || {
-                let mut out = vec![0u8; len];
+                let mut out = vec![SENTINEL; len];
                 barrier.wait();
                 let rc = unsafe { siegel_take(handle, out.as_mut_ptr(), len) };
                 (len, rc, out)
@@ -791,7 +753,7 @@ mod tests {
                 assert_eq!(out, vec![0x5A; 8]);
                 continue;
             }
-            assert!(out.iter().all(|&b| b == 0));
+            assert!(out.iter().all(|&b| b == SENTINEL));
             if len == 8 {
                 assert_eq!(rc, TAKE_ERR_WRONG_STATE);
             } else {
@@ -805,39 +767,40 @@ mod tests {
     #[test]
     fn take_rejects_empty_session() {
         let s = SiegelSession::new(8).unwrap();
-        assert_eq!(take(&s, &mut [0u8; 8]), TAKE_ERR_WRONG_STATE);
+        let mut out = [SENTINEL; 8];
+        assert_eq!(take(&s, &mut out), TAKE_ERR_WRONG_STATE);
+        assert_eq!(out, [SENTINEL; 8]);
         assert!(!s.is_consumed());
     }
 
     #[test]
     fn second_take_rejected() {
-        let s = SiegelSession::new(8).unwrap();
-        write(&s, &[7u8; 8]).unwrap();
+        let s = written(&[7u8; 8]);
         assert_eq!(take(&s, &mut [0u8; 8]), TAKE_OK);
-        let mut again = [0u8; 8];
+        let mut again = [SENTINEL; 8];
         assert_eq!(take(&s, &mut again), TAKE_ERR_WRONG_STATE);
-        assert_eq!(again, [0u8; 8]);
+        assert_eq!(again, [SENTINEL; 8]);
     }
 
     #[test]
     fn take_rejected_after_obliviate() {
-        let s = SiegelSession::new(8).unwrap();
-        write(&s, &[8u8; 8]).unwrap();
+        let s = written(&[8u8; 8]);
         s.obliviate();
-        assert_eq!(take(&s, &mut [0u8; 8]), TAKE_ERR_WRONG_STATE);
+        let mut out = [SENTINEL; 8];
+        assert_eq!(take(&s, &mut out), TAKE_ERR_WRONG_STATE);
+        assert_eq!(out, [SENTINEL; 8]);
     }
 
     #[test]
     fn take_reports_canary_corruption_and_consumes() {
         use zeroize::Zeroize;
 
-        let s = SiegelSession::new(8).unwrap();
-        write(&s, &[0xEE; 8]).unwrap();
+        let s = written(&[0xEE; 8]);
         // Zeroizing wipes the canary along with the data.
         if let SessionState::Written(siegel) = &mut *lock_state(&s.state) {
             siegel.zeroize();
         }
-        let mut out = [0xFFu8; 8];
+        let mut out = [SENTINEL; 8];
         assert_eq!(take(&s, &mut out), TAKE_ERR_CANARY);
         assert_eq!(out, [0u8; 8], "dst must be wiped on a failed take");
         assert!(s.is_consumed());
@@ -846,14 +809,13 @@ mod tests {
     #[test]
     fn take_rejected_after_session_drop() {
         let handle = {
-            let s = SiegelSession::new(8).unwrap();
-            write(&s, &[9u8; 8]).unwrap();
+            let s = written(&[9u8; 8]);
             s.handle_id()
         };
-        let mut out = [0u8; 8];
+        let mut out = [SENTINEL; 8];
         let rc = unsafe { siegel_take(handle, out.as_mut_ptr(), 8) };
         assert_eq!(rc, TAKE_ERR_INVALID_HANDLE);
-        assert_eq!(out, [0u8; 8]);
+        assert_eq!(out, [SENTINEL; 8]);
     }
 
     /// Sessions dropped on the foreign side should not pin the registry

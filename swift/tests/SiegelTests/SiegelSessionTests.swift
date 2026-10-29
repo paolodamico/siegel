@@ -27,6 +27,9 @@ private let TAKE_ERR_LEN_MISMATCH: Int32 = -2
 private let TAKE_ERR_NULL_DST: Int32 = -3
 private let TAKE_ERR_WRONG_STATE: Int32 = -4
 
+// Arbitrary non-secret bytes; rejected takes must leave the destination holding these.
+private let SENTINEL: UInt8 = 0xA5
+
 private func fill(_ session: SiegelSession, _ bytes: [UInt8]) -> Int32 {
     bytes.withUnsafeBufferPointer { buf in
         siegel_fill(session.handleId(), buf.baseAddress, buf.count)
@@ -34,7 +37,7 @@ private func fill(_ session: SiegelSession, _ bytes: [UInt8]) -> Int32 {
 }
 
 private func take(_ session: SiegelSession, _ len: Int) -> (Int32, [UInt8]) {
-    var out = [UInt8](repeating: 0, count: len)
+    var out = [UInt8](repeating: SENTINEL, count: len)
     let rc = out.withUnsafeMutableBufferPointer { buf in
         siegel_take(session.handleId(), buf.baseAddress, buf.count)
     }
@@ -229,7 +232,7 @@ final class SiegelSessionTests: XCTestCase {
 
         let (rc, bytes) = take(session, 8)
         XCTAssertEqual(rc, TAKE_ERR_WRONG_STATE)
-        XCTAssertEqual(bytes, [UInt8](repeating: 0, count: 8))
+        XCTAssertEqual(bytes, [UInt8](repeating: SENTINEL, count: 8))
         // The filled secret is still there for Rust to consume.
         XCTAssertEqual(try sha256Consume(session: session), Data(SHA256.hash(data: Data(secret))))
     }
@@ -248,7 +251,7 @@ final class SiegelSessionTests: XCTestCase {
 
         let (rc, bytes) = take(output, 32)
         XCTAssertEqual(rc, TAKE_ERR_WRONG_STATE)
-        XCTAssertEqual(bytes, [UInt8](repeating: 0, count: 32))
+        XCTAssertEqual(bytes, [UInt8](repeating: SENTINEL, count: 32))
     }
 
     func testResealRejectsEmptyInput() throws {

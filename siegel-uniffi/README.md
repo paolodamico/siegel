@@ -22,17 +22,17 @@ A session carries a secret once, in either direction.
 
 ```text
 1. application own function returns a session it wrote
-   let out = SiegelSession::new(len)?;
-   out.write_once(|buf| ...)??;                 [Rust closure]
+   let out = SiegelSession::new_written(len, |buf| ...)??;   [Rust closure]
 2. out.handle_id() -> u64
 3. siegel_take(handle, ptr, len) -> i32         [raw extern "C"]
 4. foreign code zeroizes `ptr` once done with it
+5. foreign code releases `out` (`close()` in Kotlin, last reference dropped in Swift)
 ```
 
 `siegel_take` copies into memory the foreign side owns, so wiping that copy is the foreign side's job.
 It only takes secrets Rust wrote: a secret the foreign side filled can't be read back out.
-If a take fails after the copy may have run (`TAKE_ERR_CANARY`, `TAKE_ERR_PROTECTION`), `ptr` is zeroed;
-every other error leaves it untouched.
+On `TAKE_ERR_CANARY` and `TAKE_ERR_PROTECTION` `ptr` is zeroed; every other error leaves it untouched.
+A consumed session still counts against the live-session cap until foreign code releases it.
 
-The two directions compose: a session Rust wrote can be passed straight into another
-Rust function that calls `read_once`, without the secret ever reaching foreign memory.
+A session Rust wrote can also be passed straight into another Rust function that calls
+`read_once`, skipping the foreign copy. It stays takeable by any foreign code holding it, though.

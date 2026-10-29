@@ -37,7 +37,7 @@ if [[ "$OUTPUT_DIR" != /* ]]; then
 fi
 
 # Build with the test-utils feature so the foreign test suite can reach
-# `sha256_consume` + the segfault helpers. Production consumers should
+# `sha256_consume`, `sha256_reseal` + the segfault helpers. Production consumers should
 # rebuild without it.
 FEATURES="test-utils"
 

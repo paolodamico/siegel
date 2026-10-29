@@ -49,6 +49,9 @@ private const val TAKE_ERR_LEN_MISMATCH: Int = -2
 private const val TAKE_ERR_NULL_DST: Int = -3
 private const val TAKE_ERR_WRONG_STATE: Int = -4
 
+/** Arbitrary non-secret bytes; rejected takes must leave the destination holding these. */
+private const val SENTINEL: Byte = 0xA5.toByte()
+
 /** Helper: copy `bytes` into native memory and call `siegel_fill`. */
 private fun fill(session: SiegelSession, bytes: ByteArray): Int {
     val mem = Memory(bytes.size.toLong())
@@ -59,7 +62,7 @@ private fun fill(session: SiegelSession, bytes: ByteArray): Int {
 /** Helper: call `siegel_take` into native memory, returning the code and the bytes. */
 private fun take(session: SiegelSession, len: Int): Pair<Int, ByteArray> {
     val mem = Memory(len.toLong())
-    mem.clear()
+    mem.setMemory(0, len.toLong(), SENTINEL)
     val rc = RAW.siegel_take(session.handleId().toLong(), mem, len.toLong())
     val bytes = mem.getByteArray(0, len)
     mem.clear()
@@ -272,7 +275,7 @@ class SiegelSessionTests {
 
         val (rc, bytes) = take(session, 8)
         assertEquals(TAKE_ERR_WRONG_STATE, rc)
-        assertContentEquals(ByteArray(8), bytes)
+        assertContentEquals(bytesOf(SENTINEL, 8), bytes)
         // The filled secret is still there for Rust to consume.
         val expected = MessageDigest.getInstance("SHA-256").digest(bytesOf(6, 8))
         assertContentEquals(expected, sha256Consume(session))
@@ -294,7 +297,7 @@ class SiegelSessionTests {
 
         val (rc, bytes) = take(output, 32)
         assertEquals(TAKE_ERR_WRONG_STATE, rc)
-        assertContentEquals(ByteArray(32), bytes)
+        assertContentEquals(bytesOf(SENTINEL, 32), bytes)
     }
 
     @Test
