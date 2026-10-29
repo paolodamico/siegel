@@ -29,4 +29,7 @@ allow = [
 ]
 
 [advisories]
-ignore = []
+ignore = [
+  # Remove once Cargo.lock has an askama release that includes askama-rs/askama#771.
+  { id = "RUSTSEC-2026-0374", reason = "basic-toml: build-time only, via uniffi_bindgen's askama" },
+]
