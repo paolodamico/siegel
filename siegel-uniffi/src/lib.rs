@@ -7,11 +7,10 @@
 //!
 //! Conceptually, this allows foreign code (e.g. an iOS app) to load a secret
 //! from a secure store (e.g. Keychain), and pass it to Rust-code through raw
-//! memory pointers. The same works in reverse: Rust code can write a secret
-//! output (e.g. a derived key) into a session and foreign code copies it out
-//! through a raw pointer. This addresses the issue that when passing values between
-//! the foreign boundary through `UniFFI`, any value is byte copied, which leads
-//! to dangling non-zeroized copies of secrets in memory.
+//! memory pointers, and Rust to hand secret outputs back the same way. This
+//! addresses the issue that when passing values between the foreign boundary
+//! through `UniFFI`, any value is byte copied, which leads to dangling
+//! non-zeroized copies of secrets in memory.
 #![doc = include_str!("../README.md")]
 
 mod session;

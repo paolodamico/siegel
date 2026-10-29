@@ -71,15 +71,9 @@ impl Siegel<Empty> {
         Ok(loaded)
     }
 
-    /// Unseal, run `f` with `&mut [u8]` of the full capacity, then seal.
-    /// This method consumes the `Siegel` and, if `f` succeeds, returns a
-    /// "Loaded" Siegel.
-    ///
-    /// Lets a secret be computed directly into protected memory instead of
-    /// being staged in an intermediate buffer and copied with [`write`](Self::write).
-    /// The buffer starts zeroed. If `f` returns `Err`, the bytes are zeroized
-    /// and that error is returned as the inner `Result`, so a partial secret
-    /// is never loaded.
+    /// Unseal, run `f` to compute the secret in place (buffer starts zeroed),
+    /// then seal. Consumes the `Siegel`; returns it "Loaded" only if `f`
+    /// succeeds. On `Err` the bytes are zeroized and the error is the inner `Result`.
     ///
     /// # Errors
     /// - Protection errors.
@@ -88,7 +82,7 @@ impl Siegel<Empty> {
         F: FnOnce(&mut [u8]) -> Result<(), E>,
     {
         if let Err(e) = self.region.with_write(f)? {
-            // `self` drops here, zeroizing the partial write.
+            // Dropping `self` zeroizes the partial write.
             return Ok(Err(e));
         }
         Ok(Ok(Siegel {

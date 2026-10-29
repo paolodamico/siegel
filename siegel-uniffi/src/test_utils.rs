@@ -27,23 +27,19 @@ pub fn sha256_consume(session: &SiegelSession) -> Result<Vec<u8>, SessionError> 
     })
 }
 
-/// Consume the session and return a new session loaded with SHA-256 of
-/// its bytes, for foreign code to take with `siegel_take`.
-///
-/// Mirrors the shape of a real application call producing a secret output.
+/// Consume the session and return a new one holding SHA-256 of its bytes,
+/// for `siegel_take`.
 ///
 /// # Warning
 /// Only for integration tests.
 ///
 /// # Errors
-/// - `SessionError::InvalidState` if the input session hasn't been filled.
-/// - `SessionError::Consumed` if the input session was already consumed.
-/// - Allocation / protection errors for the output session.
+/// Same as [`SiegelSession::read_once`] and [`SiegelSession::new_written`].
 #[uniffi::export]
 pub fn sha256_reseal(input: &SiegelSession) -> Result<Arc<SiegelSession>, SessionError> {
     SiegelSession::new_written(32, |buf| {
         input.read_once(|bytes| {
-            // Finalize into protected memory rather than returning the digest by value.
+            // Finalize into protected memory, not a returned temporary.
             Sha256::new_with_prefix(bytes).finalize_into(GenericArray::from_mut_slice(buf));
         })
     })?

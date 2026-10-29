@@ -34,9 +34,8 @@ const MAX_HANDLE_ALLOC_RETRIES: u8 = 8;
 /// [`siegel_fill`] writes bytes into the empty siegel and transitions
 /// the state to `Filled`; [`read_once`](Self::read_once)
 /// runs the application operation against the loaded siegel and wipes.
-/// In the other direction, [`new_written`](Self::new_written) opens a session
-/// holding a secret Rust wrote (`Written`) and [`siegel_take`] copies it out to
-/// foreign memory and wipes. Only a `Written` secret can be taken.
+/// In reverse, [`new_written`](Self::new_written) opens a `Written` session and
+/// [`siegel_take`] copies it out and wipes.
 #[derive(uniffi::Object)]
 pub struct SiegelSession {
     state: Mutex<SessionState>,
@@ -52,8 +51,6 @@ impl SiegelSession {
     /// Foreign code retrieves [`SiegelSession::handle_id()`], calls [`siegel_fill`]
     /// to write the bytes, then calls the application's `#[uniffi::export]`
     /// function (which internally invokes [`SiegelSession::read_once`]).
-    /// For a secret output, Rust code opens the session with
-    /// [`SiegelSession::new_written`] and returns it; foreign code then calls [`siegel_take`].
     ///
     /// # Errors
     ///
@@ -172,22 +169,15 @@ impl SiegelSession {
         loaded.read_once(f).map_err(SessionError::from)
     }
 
-    /// Opens a session of `len` bytes holding a secret Rust computes, so a
-    /// secret output can be handed back to foreign code via [`siegel_take`]
-    /// without crossing `UniFFI`'s byte copies.
+    /// Opens a session whose secret `f` writes straight into protected memory
+    /// (zeroed, full capacity), for foreign code to [`siegel_take`].
     ///
-    /// `f` writes the secret straight into the session's protected memory and
-    /// gets the full capacity, zeroed. Foreign code can't reach the session
-    /// before it's returned, since its handle hasn't been handed out yet. If
-    /// `f` returns `Err`, the bytes are zeroized and that error is returned as
-    /// the inner `Result`.
-    ///
-    /// Read any input session inside `f`, so the input isn't used up when the
-    /// output session can't be opened.
+    /// If `f` fails, the bytes are zeroized, no session is returned and `f`'s
+    /// error is the inner `Result`. Read any input session inside `f`, so the
+    /// input isn't used up if the output can't be opened.
     ///
     /// # Errors
-    /// - Same as [`SiegelSession::new`].
-    /// - OS-level memory errors, including a failed reseal after `f` returned.
+    /// Same as [`SiegelSession::new`], plus protection errors.
     pub fn new_written<E, F>(len: u32, f: F) -> Result<Result<Arc<Self>, E>, SessionError>
     where
         F: FnOnce(&mut [u8]) -> Result<(), E>,
@@ -196,13 +186,13 @@ impl SiegelSession {
         let mut state = lock_state(&session.state);
         let SessionState::Empty(empty) = std::mem::replace(&mut *state, SessionState::Consumed)
         else {
-            // Unreachable: `session` was opened just above and hasn't been shared.
+            // Unreachable: `session` is fresh and unshared.
             return Err(SessionError::InvalidState);
         };
 
         let written = match empty.write_with(f)? {
             Ok(written) => written,
-            // `write_with` zeroized the bytes; the unshared session drops here.
+            // `write_with` already zeroized the partial output.
             Err(e) => return Ok(Err(e)),
         };
         *state = SessionState::Written(written);
@@ -293,29 +283,22 @@ pub const TAKE_ERR_WRONG_STATE: i32 = -4;
 pub const TAKE_ERR_PROTECTION: i32 = -5;
 pub const TAKE_ERR_CANARY: i32 = -6;
 
-/// Takes the secret out of the `Siegel` into foreign memory.
+/// Copies a secret Rust wrote with [`SiegelSession::new_written`] into `dst`,
+/// then wipes and consumes the session. The reverse of [`siegel_fill`], skipping
+/// `UniFFI`'s non-zeroized copies. Zeroizing `dst` is the caller's job.
 ///
-/// Copies the session's `len` loaded bytes into `dst`, then zeroizes the
-/// siegel and consumes the session. The mirror of [`siegel_fill`] for
-/// secrets Rust produced with [`SiegelSession::new_written`]. A secret
-/// foreign code filled with [`siegel_fill`] can't be taken back out
-/// (`TAKE_ERR_WRONG_STATE`).
-///
-/// This exists to avoid the lifting behavior from `UniFFI`, which copies
-/// returned bytes through intermediate buffers that are never zeroized.
-/// The caller owns `dst` and is responsible for zeroizing it.
-///
-/// On [`TAKE_ERR_CANARY`] and [`TAKE_ERR_PROTECTION`], `dst` is zeroed (a failed
-/// reseal only surfaces after the copy). Every other error leaves `dst` untouched.
+/// A session filled by [`siegel_fill`] can't be taken (`TAKE_ERR_WRONG_STATE`).
+/// On [`TAKE_ERR_CANARY`] and [`TAKE_ERR_PROTECTION`] `dst` is zeroed; other
+/// errors leave it untouched.
 ///
 /// # Arguments
-/// - `handle`: the opaque handler received from [`SiegelSession::handle_id()`].
-/// - `dst`: the raw pointer to copy the bytes into.
-/// - `len`: the size of `dst`. Must equal the session's capacity.
+/// - `handle`: from [`SiegelSession::handle_id()`].
+/// - `dst`: where to copy the bytes.
+/// - `len`: size of `dst`; must equal the session's capacity.
 ///
 /// # Safety
 ///
-/// - `dst` **MUST** be valid for `len` bytes of write. This is the caller's responsibility.
+/// - `dst` **MUST** be valid for `len` bytes of write.
 /// - `dst` must not overlap the session's protected memory.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siegel_take(handle: u64, dst: *mut u8, len: usize) -> i32 {
@@ -342,8 +325,7 @@ pub unsafe extern "C" fn siegel_take(handle: u64, dst: *mut u8, len: usize) -> i
         return TAKE_ERR_LEN_MISMATCH;
     }
 
-    // SAFETY: `dst` is valid for `len` bytes and doesn't overlap the region
-    // if the caller implemented correctly; `bytes.len() == len` was checked above.
+    // SAFETY: the caller guarantees `dst`; `len == bytes.len()` was checked above.
     let copied = written.read_once(|bytes| unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, len);
     });
@@ -353,9 +335,8 @@ pub unsafe extern "C" fn siegel_take(handle: u64, dst: *mut u8, len: usize) -> i
         return TAKE_OK;
     };
 
-    // A reseal failure surfaces after the copy already ran; don't leave the
-    // secret in `dst` behind an error code.
-    // SAFETY: same as the copy above.
+    // A failed reseal surfaces after the copy ran, so wipe `dst`.
+    // SAFETY: as for the copy above.
     unsafe { std::ptr::write_bytes(dst, 0, len) };
 
     #[cfg(feature = "tracing")]
@@ -373,9 +354,9 @@ pub unsafe extern "C" fn siegel_take(handle: u64, dst: *mut u8, len: usize) -> i
 /// The state of the session.
 enum SessionState {
     Empty(Siegel<Empty>),
-    /// Loaded by foreign code through [`siegel_fill`]. Readable by Rust only.
+    /// Filled by foreign code ([`siegel_fill`]); only Rust can read it.
     Filled(Siegel<Loaded>),
-    /// Loaded by Rust through [`SiegelSession::new_written`]. Readable by Rust or [`siegel_take`].
+    /// Written by Rust ([`SiegelSession::new_written`]); Rust or [`siegel_take`] can read it.
     Written(Siegel<Loaded>),
     Consumed,
 }
@@ -485,7 +466,7 @@ mod tests {
         unsafe { siegel_take(session.handle_id(), dst.as_mut_ptr(), dst.len()) }
     }
 
-    /// Arbitrary non-secret bytes; error paths must leave `dst` holding these.
+    /// Non-secret filler that rejected takes must leave in `dst`.
     const SENTINEL: u8 = 0xA5;
 
     fn written(bytes: &[u8]) -> Arc<SiegelSession> {
@@ -662,8 +643,6 @@ mod tests {
         assert_eq!(digest, Sha256::digest([0x42; 16]).to_vec());
     }
 
-    /// The closure's error comes back as the inner `Result`, so an error
-    /// from a nested session can't be mistaken for the new session's own.
     #[test]
     fn new_written_returns_closure_error_and_no_session() {
         let input = SiegelSession::new(8).unwrap();
@@ -700,7 +679,6 @@ mod tests {
     fn fill_rejects_written_session() {
         let s = written(&[3u8; 8]);
         assert_eq!(fill(&s, &[4u8; 8]), FILL_ERR_WRONG_STATE);
-        // The written secret survives the rejected fill.
         let mut out = [SENTINEL; 8];
         assert_eq!(take(&s, &mut out), TAKE_OK);
         assert_eq!(out, [3u8; 8]);
@@ -733,8 +711,7 @@ mod tests {
         assert_eq!(out, [6u8; 16]);
     }
 
-    /// A secret foreign code filled must not be readable back out through a
-    /// (possibly leaked or mixed-up) handle.
+    /// A leaked or mixed-up handle must not read back a secret foreign code filled.
     #[test]
     fn take_rejects_filled_session() {
         let s = SiegelSession::new(8).unwrap();
