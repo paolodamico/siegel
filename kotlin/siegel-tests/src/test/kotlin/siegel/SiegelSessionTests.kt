@@ -266,6 +266,19 @@ class SiegelSessionTests {
     }
 
     @Test
+    fun `take rejects a session filled from native`() {
+        val session = SiegelSession(8u)
+        assertEquals(FILL_OK, fill(session, bytesOf(6, 8)))
+
+        val (rc, bytes) = take(session, 8)
+        assertEquals(TAKE_ERR_WRONG_STATE, rc)
+        assertContentEquals(ByteArray(8), bytes)
+        // The filled secret is still there for Rust to consume.
+        val expected = MessageDigest.getInstance("SHA-256").digest(bytesOf(6, 8))
+        assertContentEquals(expected, sha256Consume(session))
+    }
+
+    @Test
     fun `take before write is rejected`() {
         val session = SiegelSession(8u)
         assertEquals(TAKE_ERR_WRONG_STATE, take(session, 8).first)

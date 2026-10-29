@@ -222,6 +222,18 @@ final class SiegelSessionTests: XCTestCase {
         XCTAssertEqual(take(output, 32).0, TAKE_OK)
     }
 
+    func testTakeRejectsSessionFilledFromNative() throws {
+        let secret = [UInt8](repeating: 6, count: 8)
+        let session = try SiegelSession(len: 8)
+        XCTAssertEqual(fill(session, secret), FILL_OK)
+
+        let (rc, bytes) = take(session, 8)
+        XCTAssertEqual(rc, TAKE_ERR_WRONG_STATE)
+        XCTAssertEqual(bytes, [UInt8](repeating: 0, count: 8))
+        // The filled secret is still there for Rust to consume.
+        XCTAssertEqual(try sha256Consume(session: session), Data(SHA256.hash(data: Data(secret))))
+    }
+
     func testTakeBeforeWriteIsRejected() throws {
         let session = try SiegelSession(len: 8)
         XCTAssertEqual(take(session, 8).0, TAKE_ERR_WRONG_STATE)

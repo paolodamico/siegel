@@ -1,8 +1,10 @@
 //! Helpers for integration tests.
 
+use std::convert::Infallible;
 use std::io;
 use std::sync::Arc;
 
+use sha2::digest::generic_array::GenericArray;
 use sha2::{Digest, Sha256};
 
 use crate::session::{SessionError, SiegelSession, lookup_session};
@@ -41,10 +43,11 @@ pub fn sha256_consume(session: &SiegelSession) -> Result<Vec<u8>, SessionError> 
 #[uniffi::export]
 pub fn sha256_reseal(input: &SiegelSession) -> Result<Arc<SiegelSession>, SessionError> {
     let output = SiegelSession::new(32)?;
-    input.read_once(|bytes| {
+    let Ok(()) = input.read_once(|bytes| {
         output.write_once(|buf| {
-            buf.copy_from_slice(&Sha256::digest(bytes));
-            Ok::<_, SessionError>(())
+            // Hash straight into protected memory rather than via a stack copy.
+            Sha256::new_with_prefix(bytes).finalize_into(GenericArray::from_mut_slice(buf));
+            Ok::<_, Infallible>(())
         })
     })??;
     Ok(output)
