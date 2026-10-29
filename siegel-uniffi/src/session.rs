@@ -336,10 +336,11 @@ pub unsafe extern "C" fn siegel_take(handle: u64, dst: *mut u8, len: usize) -> i
         return TAKE_OK;
     };
 
-    // A failed reseal surfaces after the copy ran, so wipe `dst` with writes
-    // the compiler can't drop.
-    // SAFETY: as for the copy above.
-    unsafe { std::slice::from_raw_parts_mut(dst, len) }.zeroize();
+    // A failed reseal surfaces after the copy ran, so wipe `dst` with writes the
+    // compiler can't drop. `MaybeUninit` because on other errors `dst` was never written.
+    // SAFETY: the caller guarantees `dst` is valid for `len` bytes of write.
+    unsafe { std::slice::from_raw_parts_mut(dst.cast::<std::mem::MaybeUninit<u8>>(), len) }
+        .zeroize();
 
     #[cfg(feature = "tracing")]
     tracing::error!(target: "siegel", error = %e, "siegel_take failed; destination wiped");

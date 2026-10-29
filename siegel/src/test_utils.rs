@@ -13,7 +13,6 @@ pub fn fail_next_reseal() {
     FAIL_NEXT_RESEAL.set(true);
 }
 
-/// Consumes the flag set by [`fail_next_reseal`].
 pub(crate) fn take_reseal_failure() -> bool {
     FAIL_NEXT_RESEAL.replace(false)
 }

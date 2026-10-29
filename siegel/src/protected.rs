@@ -409,6 +409,23 @@ mod tests {
         assert_eq!(region.protection, Protection::NoAccess);
     }
 
+    /// The closure runs before a failed reseal is reported, and the guard's retry
+    /// still leaves the region sealed and readable.
+    #[cfg(feature = "test-utils")]
+    #[test]
+    fn with_read_reseal_failure_runs_closure_and_reseals() {
+        let mut region = ProtectedRegion::new(8).unwrap();
+        region.with_write(|buf| buf.fill(1)).unwrap();
+
+        let mut ran = false;
+        crate::test_utils::fail_next_reseal();
+        let err = region.with_read(|_| ran = true).unwrap_err();
+        assert!(ran);
+        assert!(matches!(err, ProtectionError::Mprotect(_)));
+        assert_eq!(region.protection, Protection::NoAccess);
+        assert_eq!(region.with_read(<[u8]>::to_vec).unwrap(), vec![1; 8]);
+    }
+
     #[test]
     fn canary_verified_on_read() {
         let mut region = ProtectedRegion::new(8).unwrap();
