@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+use std::convert::Infallible;
 use std::marker::PhantomData;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -63,30 +64,37 @@ impl Siegel<Empty> {
                 got: bytes.len(),
             });
         }
-        let (loaded, ()) = self.write_with(|buf| buf.copy_from_slice(bytes))?;
+        let Ok(loaded) = self.write_with(|buf| {
+            buf.copy_from_slice(bytes);
+            Ok::<_, Infallible>(())
+        })?;
         Ok(loaded)
     }
 
     /// Unseal, run `f` with `&mut [u8]` of the full capacity, then seal.
-    /// This method consumes the `Siegel` and returns a "Loaded" Siegel
-    /// alongside whatever the closure produces.
+    /// This method consumes the `Siegel` and, if `f` succeeds, returns a
+    /// "Loaded" Siegel.
     ///
     /// Lets a secret be computed directly into protected memory instead of
     /// being staged in an intermediate buffer and copied with [`write`](Self::write).
-    /// The buffer starts zeroed; bytes `f` doesn't touch stay zero.
+    /// The buffer starts zeroed. If `f` returns `Err`, the bytes are zeroized
+    /// and that error is returned as the inner `Result`, so a partial secret
+    /// is never loaded.
     ///
     /// # Errors
     /// - Protection errors.
-    pub fn write_with<T, F>(mut self, f: F) -> Result<(Siegel<Loaded>, T), SiegelError>
+    pub fn write_with<E, F>(mut self, f: F) -> Result<Result<Siegel<Loaded>, E>, SiegelError>
     where
-        F: FnOnce(&mut [u8]) -> T,
+        F: FnOnce(&mut [u8]) -> Result<(), E>,
     {
-        let result = self.region.with_write(f)?;
-        let loaded = Siegel {
+        if let Err(e) = self.region.with_write(f)? {
+            // `self` drops here, zeroizing the partial write.
+            return Ok(Err(e));
+        }
+        Ok(Ok(Siegel {
             region: self.region,
             _state: PhantomData,
-        };
-        Ok((loaded, result))
+        }))
     }
 }
 
@@ -218,16 +226,39 @@ mod tests {
     #[test]
     fn write_with_computes_into_protected_memory() {
         let empty: Siegel<Empty> = Siegel::new(32).unwrap();
-        let (loaded, untouched_was_zero) = empty
+        let mut started_zeroed = false;
+        let Ok(loaded) = empty
             .write_with(|buf| {
-                let was_zero = buf.iter().all(|&b| b == 0);
+                started_zeroed = buf.iter().all(|&b| b == 0);
                 buf.copy_from_slice(&Sha256::digest(b"seed"));
-                was_zero
+                Ok::<_, Infallible>(())
             })
             .unwrap();
-        assert!(untouched_was_zero);
+        assert!(started_zeroed);
         let copy = loaded.read_once(<[u8]>::to_vec).unwrap();
         assert_eq!(copy, Sha256::digest(b"seed").to_vec());
+    }
+
+    #[test]
+    fn write_with_closure_error_loads_nothing() {
+        let empty: Siegel<Empty> = Siegel::new(8).unwrap();
+        let result = empty
+            .write_with(|buf| {
+                buf.fill(0xAA);
+                Err("derivation failed")
+            })
+            .unwrap();
+        assert!(matches!(result, Err("derivation failed")));
+    }
+
+    #[test]
+    #[expect(clippy::panic, reason = "deliberately panicking inside the closure")]
+    fn write_with_panic_still_drops_region() {
+        let empty: Siegel<Empty> = Siegel::new(8).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            empty.write_with(|_| -> Result<(), Infallible> { panic!("derivation failed") })
+        }));
+        assert!(result.is_err());
     }
 
     #[test]

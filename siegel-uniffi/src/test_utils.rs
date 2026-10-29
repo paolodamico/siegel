@@ -1,6 +1,5 @@
 //! Helpers for integration tests.
 
-use std::convert::Infallible;
 use std::io;
 use std::sync::Arc;
 
@@ -42,14 +41,12 @@ pub fn sha256_consume(session: &SiegelSession) -> Result<Vec<u8>, SessionError> 
 /// - Allocation / protection errors for the output session.
 #[uniffi::export]
 pub fn sha256_reseal(input: &SiegelSession) -> Result<Arc<SiegelSession>, SessionError> {
-    let Ok(output) = input.read_once(|bytes| {
-        SiegelSession::new_written(32, |buf| {
-            // Write the digest straight into protected memory instead of via a stack copy.
+    SiegelSession::new_written(32, |buf| {
+        input.read_once(|bytes| {
+            // Finalize into protected memory rather than returning the digest by value.
             Sha256::new_with_prefix(bytes).finalize_into(GenericArray::from_mut_slice(buf));
-            Ok::<_, Infallible>(())
         })
-    })??;
-    Ok(output)
+    })?
 }
 
 /// Sentinel return values for the segfault helpers.

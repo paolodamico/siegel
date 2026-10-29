@@ -29,6 +29,9 @@ A session carries a secret once, in either direction.
 5. foreign code releases `out` (`close()` in Kotlin, last reference dropped in Swift)
 ```
 
+Read any input session inside the closure (`new_written(len, |buf| input.read_once(..))`), so the
+input isn't used up when the output session can't be opened.
+
 `siegel_take` copies into memory the foreign side owns, so wiping that copy is the foreign side's job.
 It only takes secrets Rust wrote: a secret the foreign side filled can't be read back out.
 On `TAKE_ERR_CANARY` and `TAKE_ERR_PROTECTION` `ptr` is zeroed; every other error leaves it untouched.

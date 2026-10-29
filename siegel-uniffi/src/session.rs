@@ -114,7 +114,7 @@ impl SiegelSession {
     ///
     /// Stable for the lifetime of the session. Callers can use this to
     /// verify the session matches the size they expected before invoking
-    /// [`read_once`](Self::read_once).
+    /// [`read_once`](Self::read_once), or to size the buffer for [`siegel_take`].
     #[must_use]
     #[expect(clippy::len_without_is_empty, reason = "sessions are always non-empty")]
     pub fn len(&self) -> u32 {
@@ -177,13 +177,17 @@ impl SiegelSession {
     /// without crossing `UniFFI`'s byte copies.
     ///
     /// `f` writes the secret straight into the session's protected memory and
-    /// gets the full capacity, zeroed. The session only exists once `f`
-    /// succeeds, so nothing else can reach it meanwhile. If `f` returns `Err`,
-    /// the bytes are zeroized and that error is returned as the inner `Result`.
+    /// gets the full capacity, zeroed. Foreign code can't reach the session
+    /// before it's returned, since its handle hasn't been handed out yet. If
+    /// `f` returns `Err`, the bytes are zeroized and that error is returned as
+    /// the inner `Result`.
+    ///
+    /// Read any input session inside `f`, so the input isn't used up when the
+    /// output session can't be opened.
     ///
     /// # Errors
     /// - Same as [`SiegelSession::new`].
-    /// - OS-level memory errors.
+    /// - OS-level memory errors, including a failed reseal after `f` returned.
     pub fn new_written<E, F>(len: u32, f: F) -> Result<Result<Arc<Self>, E>, SessionError>
     where
         F: FnOnce(&mut [u8]) -> Result<(), E>,
@@ -192,15 +196,15 @@ impl SiegelSession {
         let mut state = lock_state(&session.state);
         let SessionState::Empty(empty) = std::mem::replace(&mut *state, SessionState::Consumed)
         else {
-            // `session` was opened just above and hasn't been shared.
+            // Unreachable: `session` was opened just above and hasn't been shared.
             return Err(SessionError::InvalidState);
         };
 
-        let (written, result) = empty.write_with(f)?;
-        if let Err(e) = result {
-            // `written` and the unshared session drop here, zeroized.
-            return Ok(Err(e));
-        }
+        let written = match empty.write_with(f)? {
+            Ok(written) => written,
+            // `write_with` zeroized the bytes; the unshared session drops here.
+            Err(e) => return Ok(Err(e)),
+        };
         *state = SessionState::Written(written);
         drop(state);
         Ok(Ok(session))
@@ -644,12 +648,14 @@ mod tests {
     }
 
     #[test]
-    fn read_once_can_chain_into_new_written() {
+    fn new_written_can_derive_from_an_input_session() {
         let input = SiegelSession::new(16).unwrap();
         assert_eq!(fill(&input, &[0x42; 16]), FILL_OK);
-        let output = input
-            .read_once(|seed| written(&Sha256::digest(seed)))
-            .unwrap();
+        let output = SiegelSession::new_written(32, |buf| {
+            input.read_once(|seed| buf.copy_from_slice(&Sha256::digest(seed)))
+        })
+        .unwrap()
+        .unwrap();
         assert!(input.is_consumed());
 
         let digest = output.read_once(<[u8]>::to_vec).unwrap();
@@ -668,6 +674,20 @@ mod tests {
         .unwrap();
         assert!(matches!(inner, Err(SessionError::InvalidState)));
         assert!(!input.is_consumed());
+    }
+
+    #[test]
+    #[expect(clippy::panic, reason = "deliberately panicking inside the closure")]
+    fn new_written_panic_leaves_sessions_usable() {
+        let result = std::panic::catch_unwind(|| {
+            SiegelSession::new_written(8, |_| -> Result<(), Infallible> {
+                panic!("derivation failed")
+            })
+        });
+        assert!(result.is_err());
+        let s = SiegelSession::new(8).unwrap();
+        assert_eq!(fill(&s, &[1u8; 8]), FILL_OK);
+        assert_eq!(s.read_once(<[u8]>::to_vec).unwrap(), vec![1u8; 8]);
     }
 
     #[test]
