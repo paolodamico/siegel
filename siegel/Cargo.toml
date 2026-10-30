@@ -29,6 +29,8 @@ tracing = { version = "0.1", optional = true, default-features = false }
 
 [dev-dependencies]
 sha2 = "0.10"
+# Self-reference so unit tests can use the `test-utils` reseal-failure hook.
+siegel = { path = ".", features = ["test-utils"] }
 
 [package.metadata.docs.rs]
 features = ["session"]

@@ -214,6 +214,12 @@ impl ProtectedRegion {
     ///
     /// `ProtectionError::Mprotect` if the underlying syscall fails.
     fn mprotect_noaccess(&mut self) -> Result<(), ProtectionError> {
+        #[cfg(feature = "test-utils")]
+        if crate::test_utils::take_reseal_failure() {
+            return Err(ProtectionError::Mprotect(io::Error::from_raw_os_error(
+                libc::ENOMEM,
+            )));
+        }
         mprotect(self.data, self.data_pages_len, Protection::NoAccess)?;
         self.protection = Protection::NoAccess;
         Ok(())
@@ -285,9 +291,9 @@ enum Protection {
 ///
 /// Used by `with_read` / `with_write`. On the success path, callers
 /// invoke `finish()` to re-seal explicitly and propagate any `mprotect`
-/// failure as `ProtectionError::Mprotect`. The `Drop` path is reached
-/// during unwind from a closure panic, where it re-seals
-/// best-effort.
+/// failure as `ProtectionError::Mprotect`. `Drop` re-seals best-effort: during
+/// unwind from a closure panic, and after `finish()` too, which retries a failed
+/// reseal.
 struct ResealOnDrop<'a> {
     region: &'a mut ProtectedRegion,
 }
@@ -401,6 +407,23 @@ mod tests {
         let mut region = ProtectedRegion::new(16).unwrap();
         region.mprotect_noaccess().unwrap();
         assert_eq!(region.protection, Protection::NoAccess);
+    }
+
+    /// The closure runs before a failed reseal is reported, and the guard's retry
+    /// still leaves the region sealed and readable.
+    #[cfg(feature = "test-utils")]
+    #[test]
+    fn with_read_reseal_failure_runs_closure_and_reseals() {
+        let mut region = ProtectedRegion::new(8).unwrap();
+        region.with_write(|buf| buf.fill(1)).unwrap();
+
+        let mut ran = false;
+        crate::test_utils::fail_next_reseal();
+        let err = region.with_read(|_| ran = true).unwrap_err();
+        assert!(ran);
+        assert!(matches!(err, ProtectionError::Mprotect(_)));
+        assert_eq!(region.protection, Protection::NoAccess);
+        assert_eq!(region.with_read(<[u8]>::to_vec).unwrap(), vec![1; 8]);
     }
 
     #[test]

@@ -1,7 +1,22 @@
+use std::cell::Cell;
 use std::io;
 
 use crate::ProtectedRegion;
 use crate::Siegel;
+
+thread_local! {
+    static FAIL_NEXT_RESEAL: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Test-only: make the next reseal to `PROT_NONE` on this thread fail with
+/// `ENOMEM`, to exercise error paths that run after a secret was unsealed.
+pub fn fail_next_reseal() {
+    FAIL_NEXT_RESEAL.set(true);
+}
+
+pub(crate) fn take_reseal_failure() -> bool {
+    FAIL_NEXT_RESEAL.replace(false)
+}
 
 impl ProtectedRegion {
     /// Test-only: read one byte from the front guard page. The guard

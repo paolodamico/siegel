@@ -4,7 +4,8 @@ use siegel::session::{self, MAX_ACTIVE_SESSIONS, SessionCore};
 
 pub use siegel::session::{
     FILL_ERR_INVALID_HANDLE, FILL_ERR_LEN_MISMATCH, FILL_ERR_NULL_SRC, FILL_ERR_PROTECTION,
-    FILL_ERR_WRONG_STATE, FILL_OK,
+    FILL_ERR_WRONG_STATE, FILL_OK, TAKE_ERR_CANARY, TAKE_ERR_INVALID_HANDLE, TAKE_ERR_LEN_MISMATCH,
+    TAKE_ERR_NULL_DST, TAKE_ERR_PROTECTION, TAKE_ERR_WRONG_STATE, TAKE_OK,
 };
 
 /// One-time secret-handling session, held by foreign code as
@@ -24,8 +25,9 @@ impl SiegelSession {
     /// # Errors
     ///
     /// `SessionError::InvalidLength` for `len == 0` or `len > 1 MiB`.
-    /// `SessionError::TooManyActiveSessions` if the registry is at its cap.
-    /// Allocation / protection / lock errors propagate from `siegel`.
+    /// `SessionError::TooManyActiveSessions` if the session cap is reached.
+    /// Allocation / protection errors propagate from `siegel`. A failed `mlock`
+    /// does not fail the constructor; query [`is_locked`](Self::is_locked).
     #[uniffi::constructor]
     pub fn new(len: u32) -> Result<Arc<Self>, SessionError> {
         Ok(Arc::new(Self(SessionCore::new(len)?)))
@@ -34,7 +36,7 @@ impl SiegelSession {
 
 #[uniffi::export]
 impl SiegelSession {
-    /// Opaque identifier handle for [`siegel_fill`].
+    /// Opaque identifier handle for [`siegel_fill`] and [`siegel_take`].
     #[must_use]
     pub fn handle_id(&self) -> u64 {
         self.0.handle_id()
@@ -42,7 +44,7 @@ impl SiegelSession {
 
     /// Capacity of the session in bytes.
     ///
-    /// Stable for the lifetime of the session.
+    /// Stable for the lifetime of the session. Sizes the buffer for [`siegel_take`].
     #[must_use]
     #[expect(clippy::len_without_is_empty, reason = "sessions are always non-empty")]
     pub fn len(&self) -> u32 {
@@ -61,7 +63,8 @@ impl SiegelSession {
         self.0.is_consumed()
     }
 
-    /// Whether the secret's pages are locked in RAM (`mlock`ed).
+    /// Whether the secret's pages are locked in RAM (`mlock`ed). Always
+    /// `false` once consumed: the session holds no pages to lock.
     #[must_use]
     pub fn is_locked(&self) -> bool {
         self.0.is_locked()
@@ -75,7 +78,7 @@ impl SiegelSession {
     /// used once.
     ///
     /// # Errors
-    /// - `InvalidState` if the session hasn't been filled.
+    /// - `InvalidState` if the session holds no secret yet.
     /// - `Consumed` if already consumed.
     /// - OS-level memory errors.
     pub fn read_once<T, F>(&self, f: F) -> Result<T, SessionError>
@@ -84,14 +87,30 @@ impl SiegelSession {
     {
         self.0.read_once(f).map_err(SessionError::from)
     }
+
+    /// Opens a session whose secret `f` writes straight into protected memory
+    /// (zeroed, full capacity), for foreign code to [`siegel_take`].
+    ///
+    /// If `f` fails, the bytes are zeroized, no session is returned and `f`'s
+    /// error is the inner `Result`. Read any input session inside `f`, so the
+    /// input isn't used up if the output can't be opened.
+    ///
+    /// # Errors
+    /// Same as [`SiegelSession::new`], plus protection errors.
+    pub fn new_written<E, F>(len: u32, f: F) -> Result<Result<Arc<Self>, E>, SessionError>
+    where
+        F: FnOnce(&mut [u8]) -> Result<(), E>,
+    {
+        Ok(SessionCore::new_written(len, f)?.map(|core| Arc::new(Self(core))))
+    }
 }
 
 /// Fills the `Siegel` with the actual data.
 ///
 /// Copies `len` bytes from `src` raw pointer into the session's siegel.
 ///
-/// This is the only function that crosses the foreign boundary outside
-/// of `UniFFI`. This exists to avoid the lowering behavior from `UniFFI` which
+/// This and [`siegel_take`] are the only functions that cross the foreign
+/// boundary outside of `UniFFI`. This exists to avoid the lowering behavior from `UniFFI` which
 /// creates a new buffer of the bytes in transit.
 ///
 /// # Arguments
@@ -101,13 +120,32 @@ impl SiegelSession {
 ///
 /// # Safety
 ///
-/// - `src` **MUST** be valid for `len` bytes of read. This is the caller's responsibility.
-/// - The caller must not race fills against `read_once` or
-///   `obliviate` on the same session.
+/// Same as [`siegel::session::fill_into`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siegel_fill(handle: u64, src: *const u8, len: usize) -> i32 {
     // SAFETY: forwarded verbatim; the caller upholds this function's contract.
     unsafe { session::fill_into(handle, src, len) }
+}
+
+/// Copies a secret Rust wrote with [`SiegelSession::new_written`] into `dst`,
+/// then wipes and consumes the session. The reverse of [`siegel_fill`], skipping
+/// `UniFFI`'s non-zeroized copies. Zeroizing `dst` is the caller's job.
+///
+/// A session filled by [`siegel_fill`] can't be taken (`TAKE_ERR_WRONG_STATE`).
+/// On [`TAKE_ERR_CANARY`] and [`TAKE_ERR_PROTECTION`] `dst` is zeroed; other
+/// errors leave it untouched.
+///
+/// # Arguments
+/// - `handle`: from [`SiegelSession::handle_id()`].
+/// - `dst`: where to copy the bytes.
+/// - `len`: size of `dst`; must equal the session's capacity.
+///
+/// # Safety
+/// Same as [`siegel::session::take_into`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn siegel_take(handle: u64, dst: *mut u8, len: usize) -> i32 {
+    // SAFETY: forwarded verbatim; the caller upholds this function's contract.
+    unsafe { session::take_into(handle, dst, len) }
 }
 
 /// Errors surfaced to foreign bindings.
@@ -116,7 +154,7 @@ pub unsafe extern "C" fn siegel_fill(handle: u64, src: *const u8, len: usize) ->
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 #[uniffi(flat_error)]
 pub enum SessionError {
-    #[error("requested length must be 1..=1Mb")]
+    #[error("requested length must be 1..=1MiB")]
     InvalidLength,
     #[error("input length doesn't match the session's capacity")]
     LengthMismatch,
@@ -214,5 +252,21 @@ mod tests {
         };
         let rc = unsafe { siegel_fill(handle, [0u8; 8].as_ptr(), 8) };
         assert_eq!(rc, FILL_ERR_INVALID_HANDLE);
+    }
+
+    /// The wrapper must register the written core, or `siegel_take` would
+    /// never resolve it.
+    #[test]
+    fn written_wrapper_resolves_through_raw_take() {
+        let Ok(s) = SiegelSession::new_written(8, |buf| {
+            buf.fill(0x5A);
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+        let mut out = [0u8; 8];
+        let rc = unsafe { siegel_take(s.handle_id(), out.as_mut_ptr(), out.len()) };
+        assert_eq!(rc, TAKE_OK);
+        assert_eq!(out, [0x5A; 8]);
+        assert!(s.is_consumed());
     }
 }
