@@ -13,7 +13,9 @@ mod session;
 
 pub use session::{
     FILL_ERR_INVALID_HANDLE, FILL_ERR_LEN_MISMATCH, FILL_ERR_NULL_SRC, FILL_ERR_PROTECTION,
-    FILL_ERR_WRONG_STATE, FILL_OK, SessionError, SiegelSession, siegel_fill_bolt,
+    FILL_ERR_WRONG_STATE, FILL_OK, SessionError, SiegelSession, TAKE_ERR_CANARY,
+    TAKE_ERR_INVALID_HANDLE, TAKE_ERR_LEN_MISMATCH, TAKE_ERR_NULL_DST, TAKE_ERR_PROTECTION,
+    TAKE_ERR_WRONG_STATE, TAKE_OK, siegel_fill_bolt, siegel_take_bolt,
 };
 
 // Compile-time check: required for Android to fill a session
@@ -34,4 +36,4 @@ pub mod jvm;
 #[cfg(feature = "test-utils")]
 mod test_utils;
 #[cfg(feature = "test-utils")]
-pub use test_utils::sha256_consume;
+pub use test_utils::{sha256_consume, sha256_reseal};

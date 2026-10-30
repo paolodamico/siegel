@@ -44,7 +44,8 @@ impl Siegel<Empty> {
     ///
     /// # Errors
     /// - `SiegelError::InvalidLength` (on well, invalid length)
-    /// - Allocation / protection / lock errors if the OS calls fail.
+    /// - Allocation / protection errors if the OS calls fail. A failed `mlock`
+    ///   is not an error; query [`is_locked`](Self::is_locked).
     pub fn new(len: usize) -> Result<Self, SiegelError> {
         let region = ProtectedRegion::new(len)?;
         Ok(Self {

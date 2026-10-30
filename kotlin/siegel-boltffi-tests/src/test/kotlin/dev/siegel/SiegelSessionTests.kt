@@ -1,5 +1,6 @@
 package dev.siegel
 
+import java.nio.BufferOverflowException
 import java.nio.ByteBuffer
 import java.security.MessageDigest
 import kotlin.test.Test
@@ -11,33 +12,58 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 /**
- * Fills a session through the direct-ByteBuffer JNI path.
+ * Raw fill through the direct-ByteBuffer JNI path, returning the code so tests
+ * can assert on it. [fillSession] is the checked API.
  *
  * Deliberately *not* a `ByteArray`: BoltFFI's generated `&[u8]` lowering would
  * put the secret on the managed heap, where a copying collector can leave
  * unreachable duplicates and `GetByteArrayElements` may take a further copy
  * that Kotlin cannot wipe.
  */
+private fun fillRaw(handle: Long, bytes: ByteArray): Int =
+    withDirectSecretBuffer(bytes.size) { buffer ->
+        buffer.put(bytes)
+        SiegelNative.fillDirect(handle, buffer, bytes.size)
+    }
+
 private fun fill(session: SiegelSession, bytes: ByteArray): Int =
-    fillSession(session, bytes.size) { buffer -> buffer.put(bytes) }
+    fillRaw(session.handleId().toLong(), bytes)
+
+/** Arbitrary non-secret bytes; rejected takes must leave the destination holding these. */
+private const val SENTINEL: Byte = 0xA5.toByte()
+
+/** Raw take into a sentinel-filled buffer of [len] bytes, returning the code and its contents. */
+private fun takeRaw(session: SiegelSession, len: Int): Pair<Int, ByteArray> =
+    withDirectSecretBuffer(len) { buffer ->
+        while (buffer.hasRemaining()) buffer.put(SENTINEL)
+        val rc = SiegelNative.takeDirect(session.handleId().toLong(), buffer, len)
+        rc to ByteArray(len).also { buffer.duplicate().apply { clear() }.get(it) }
+    }
 
 private fun bytesOf(value: Byte, len: Int): ByteArray = ByteArray(len) { value }
+
+private fun sha256(bytes: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(bytes)
+
+/** A session holding SHA-256 of [secret], written by Rust and ready to take. */
+private fun resealed(secret: ByteArray): SiegelSession =
+    SiegelSession(secret.size.toUInt()).use { input ->
+        assertEquals(SiegelNative.FILL_OK, fill(input, secret))
+        sha256Reseal(input)
+    }
 
 class SiegelSessionTests {
 
     @Test
-    fun `new session is not consumed`() {
-        val session = SiegelSession(32u)
+    fun `new session is not consumed`(): Unit = withSession(32) { session ->
         assertFalse(session.isConsumed())
         assertEquals(session.handleId(), session.handleId())
     }
 
     @Test
-    fun `consumed session reports unlocked`() {
+    fun `consumed session reports unlocked`(): Unit = withSession(8) { session ->
         // `isLocked()` is best-effort: a live session may be locked or not
         // depending on the platform's mlock support. A consumed session holds
         // no memory and must always report unlocked — deterministic anywhere.
-        val session = SiegelSession(8u)
         session.obliviate()
         assertFalse(session.isLocked())
     }
@@ -48,24 +74,25 @@ class SiegelSessionTests {
     }
 
     @Test
-    fun `fill and consume returns sha256`() {
+    fun `withSession rejects a non-positive size`() {
+        // `-4` would otherwise become 4294967292 through `toUInt()`.
+        assertFailsWith<IllegalArgumentException> { withSession(-4) {} }
+        assertFailsWith<IllegalArgumentException> { withSession(0) {} }
+    }
+
+    @Test
+    fun `fill and consume returns sha256`(): Unit = withSession(16) { session ->
         val secret = bytesOf(0x42, 16)
-        val session = SiegelSession(16u)
+        fillSession(session) { it.put(secret) }
 
-        assertEquals(SiegelNative.FILL_OK, fill(session, secret))
-
-        val digest = sha256Consume(session)
-        val expected = MessageDigest.getInstance("SHA-256").digest(secret)
-
-        assertContentEquals(expected, digest)
+        assertContentEquals(sha256(secret), sha256Consume(session))
         assertTrue(session.isConsumed())
     }
 
     @Test
-    fun `fill rejects a heap-backed buffer`() {
+    fun `fill rejects a heap-backed buffer`(): Unit = withSession(8) { session ->
         // The whole point of this path: a non-direct buffer must be refused
         // rather than silently reintroducing unzeroizable copies.
-        val session = SiegelSession(8u)
         val heapBuffer = ByteBuffer.allocate(8)
         assertEquals(
             SiegelNative.FILL_ERR_NOT_DIRECT,
@@ -77,25 +104,18 @@ class SiegelSessionTests {
 
     @Test
     fun `fill rejects unknown handle`() {
-        val result = withDirectSecretBuffer(4) { buffer ->
-            SiegelNative.fillDirect(0xDEADL, buffer, 4)
-        }
-        assertEquals(SiegelNative.FILL_ERR_INVALID_HANDLE, result)
+        assertEquals(SiegelNative.FILL_ERR_INVALID_HANDLE, fillRaw(0xDEADL, ByteArray(4)))
     }
 
     @Test
     fun `fill rejects a zero handle`() {
-        val result = withDirectSecretBuffer(4) { buffer ->
-            SiegelNative.fillDirect(0L, buffer, 4)
-        }
-        assertEquals(SiegelNative.FILL_ERR_INVALID_HANDLE, result)
+        assertEquals(SiegelNative.FILL_ERR_INVALID_HANDLE, fillRaw(0L, ByteArray(4)))
     }
 
     @Test
-    fun `fill rejects length exceeding buffer capacity`() {
+    fun `fill rejects length exceeding buffer capacity`(): Unit = withSession(16) { session ->
         // Guards the read-past-the-allocation case: the JVM's reported
         // capacity wins over the caller's claimed length.
-        val session = SiegelSession(16u)
         val result = withDirectSecretBuffer(8) { buffer ->
             SiegelNative.fillDirect(session.handleId().toLong(), buffer, 16)
         }
@@ -103,23 +123,38 @@ class SiegelSessionTests {
     }
 
     @Test
-    fun `fill rejects length mismatch and recovers`() {
-        val session = SiegelSession(16u)
+    fun `fill rejects a buffer larger than the length`(): Unit = withSession(8) { session ->
+        // An oversized buffer means the secret may not start where the read does.
+        val result = withDirectSecretBuffer(16) { buffer ->
+            SiegelNative.fillDirect(session.handleId().toLong(), buffer, 8)
+        }
+        assertEquals(SiegelNative.FILL_ERR_LEN_MISMATCH, result)
+        assertFalse(session.isConsumed())
+    }
+
+    @Test
+    fun `fill rejects a negative length`(): Unit = withSession(8) { session ->
+        val result = withDirectSecretBuffer(8) { buffer ->
+            SiegelNative.fillDirect(session.handleId().toLong(), buffer, -8)
+        }
+        assertEquals(SiegelNative.FILL_ERR_LEN_MISMATCH, result)
+    }
+
+    @Test
+    fun `fill rejects length mismatch and recovers`(): Unit = withSession(16) { session ->
         assertEquals(SiegelNative.FILL_ERR_LEN_MISMATCH, fill(session, ByteArray(8)))
         // Session is still usable for a correct-length fill.
         assertEquals(SiegelNative.FILL_OK, fill(session, ByteArray(16)))
     }
 
     @Test
-    fun `double fill is rejected`() {
-        val session = SiegelSession(8u)
+    fun `double fill is rejected`(): Unit = withSession(8) { session ->
         assertEquals(SiegelNative.FILL_OK, fill(session, bytesOf(1, 8)))
         assertEquals(SiegelNative.FILL_ERR_WRONG_STATE, fill(session, bytesOf(1, 8)))
     }
 
     @Test
-    fun `consume before fill is InvalidState`() {
-        val session = SiegelSession(8u)
+    fun `consume before fill is InvalidState`(): Unit = withSession(8) { session ->
         assertFailsWith<SessionError.InvalidState> { sha256Consume(session) }
         assertFalse(session.isConsumed())
         // After an InvalidState error the session is still fillable.
@@ -128,24 +163,21 @@ class SiegelSessionTests {
     }
 
     @Test
-    fun `second consume is rejected`() {
-        val session = SiegelSession(8u)
+    fun `second consume is rejected`(): Unit = withSession(8) { session ->
         assertEquals(SiegelNative.FILL_OK, fill(session, bytesOf(3, 8)))
         sha256Consume(session)
         assertFailsWith<SessionError.Consumed> { sha256Consume(session) }
     }
 
     @Test
-    fun `fill after consume is rejected`() {
-        val session = SiegelSession(8u)
+    fun `fill after consume is rejected`(): Unit = withSession(8) { session ->
         assertEquals(SiegelNative.FILL_OK, fill(session, bytesOf(4, 8)))
         sha256Consume(session)
         assertEquals(SiegelNative.FILL_ERR_WRONG_STATE, fill(session, bytesOf(4, 8)))
     }
 
     @Test
-    fun `obliviate wipes and is idempotent`() {
-        val session = SiegelSession(16u)
+    fun `obliviate wipes and is idempotent`(): Unit = withSession(16) { session ->
         assertEquals(SiegelNative.FILL_OK, fill(session, bytesOf(5, 16)))
 
         session.obliviate()
@@ -156,15 +188,12 @@ class SiegelSessionTests {
     }
 
     @Test
-    fun `distinct sessions have distinct handles`() {
-        val a = SiegelSession(8u)
-        val b = SiegelSession(8u)
-        assertNotEquals(a.handleId(), b.handleId())
+    fun `distinct sessions have distinct handles`(): Unit = withSession(8) { a ->
+        withSession(8) { b -> assertNotEquals(a.handleId(), b.handleId()) }
     }
 
     @Test
-    fun `len reports allocated capacity`() {
-        val session = SiegelSession(64u)
+    fun `len reports allocated capacity`(): Unit = withSession(64) { session ->
         assertEquals(64u, session.len())
         assertEquals(SiegelNative.FILL_OK, fill(session, bytesOf(7, 64)))
         assertEquals(64u, session.len())
@@ -178,27 +207,31 @@ class SiegelSessionTests {
         SiegelSession(8u).use { session ->
             handle = session.handleId().toLong()
         }
-        val rc = withDirectSecretBuffer(8) { buffer ->
-            SiegelNative.fillDirect(handle, buffer, 8)
-        }
-        assertEquals(SiegelNative.FILL_ERR_INVALID_HANDLE, rc)
+        assertEquals(SiegelNative.FILL_ERR_INVALID_HANDLE, fillRaw(handle, ByteArray(8)))
     }
 
     @Test
     fun `withSession closes the session`() {
         var handle = 0L
         withSession(8) { session -> handle = session.handleId().toLong() }
-        val rc = withDirectSecretBuffer(8) { buffer ->
-            SiegelNative.fillDirect(handle, buffer, 8)
-        }
-        assertEquals(SiegelNative.FILL_ERR_INVALID_HANDLE, rc)
+        assertEquals(SiegelNative.FILL_ERR_INVALID_HANDLE, fillRaw(handle, ByteArray(8)))
+    }
+
+    /** A session that escapes `withSession` must refuse calls rather than touch freed memory. */
+    @Test
+    fun `calls after close throw`() {
+        val escaped = withSession(8) { it }
+        assertFailsWith<IllegalStateException> { escaped.handleId() }
+        assertFailsWith<IllegalStateException> { escaped.isConsumed() }
+        assertFailsWith<IllegalStateException> { sha256Consume(escaped) }
+        escaped.close() // idempotent
     }
 
     /**
      * Pins the lifetime hazard that makes [withSession] mandatory: the
      * generated `SiegelSession` registers no `Cleaner`, so an unclosed session
-     * survives garbage collection and keeps its mlocked pages and its slot in
-     * the 1024-session registry for the life of the process.
+     * survives garbage collection and keeps its pages and its slot under the
+     * session cap until it is consumed.
      *
      * If BoltFFI ever starts registering a cleaner this test will fail — at
      * which point the warnings on [withSession] and in the README can be
@@ -211,72 +244,56 @@ class SiegelSessionTests {
             System.gc()
             Thread.sleep(50)
         }
-        val rc = withDirectSecretBuffer(8) { buffer ->
-            SiegelNative.fillDirect(handle, buffer, 8)
-        }
         assertEquals(
             SiegelNative.FILL_OK,
-            rc,
+            fillRaw(handle, ByteArray(8)),
             "expected the leaked session to still be live; if this now fails, " +
                 "BoltFFI may have added cleaner support — see withSession's KDoc",
         )
     }
 
     @Test
-    fun `fillSession rejects a partially written buffer`() {
-        // `fillDirect` reads from the allocation's base address, so a short
-        // write would otherwise load whatever sat at index 0.
-        val session = SiegelSession(16u)
+    fun `fillSession rejects a partial write`(): Unit = withSession(16) { session ->
         assertFailsWith<IllegalArgumentException> {
-            fillSession(session, 16) { buffer -> buffer.put(ByteArray(8)) }
+            fillSession(session) { it.put(ByteArray(8)) }
         }
         assertFalse(session.isConsumed())
     }
 
     @Test
-    fun `fillSession rejects a flipped buffer`() {
-        // The idiomatic NIO habit: put() then flip() leaves position at 0, so
-        // the byte-count check must reject it rather than fill from a buffer
-        // whose cursor says nothing was written.
-        val session = SiegelSession(16u)
-        assertFailsWith<IllegalArgumentException> {
-            fillSession(session, 16) { buffer ->
-                buffer.put(bytesOf(0x11, 16))
-                buffer.flip()
-            }
+    fun `fillSession rejects an overlong write`(): Unit = withSession(8) { session ->
+        assertFailsWith<BufferOverflowException> {
+            fillSession(session) { it.put(ByteArray(9)) }
         }
         assertFalse(session.isConsumed())
     }
 
-    /**
-     * Documents a known limitation rather than a guarantee: `fillSession`
-     * verifies how many bytes were written, not where. A callback that
-     * repositions and then writes the right count passes the check and loads
-     * shifted data. Pinned here so the gap is visible
-     */
     @Test
-    fun `fillSession does not detect a repositioned write`() {
-        val session = SiegelSession(8u)
-        val rc = fillSession(session, 8) { buffer ->
-            buffer.position(1)
-            buffer.put(bytesOf(0x33, 7)) // ends at position 8 — check passes
+    fun `fillSession writes in order from index zero`(): Unit = withSession(8) { session ->
+        val secret = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8)
+        fillSession(session) { sink ->
+            sink.put(secret[0])
+            sink.put(secret, 1, 3)
+            sink.put(ByteBuffer.wrap(secret, 4, 4))
+            assertEquals(0, sink.remaining)
         }
-        assertEquals(SiegelNative.FILL_OK, rc)
-        // What Rust received is a leading zero plus the shifted bytes, not the
-        // secret the caller believed they wrote.
-        val shifted = ByteArray(8).also { java.util.Arrays.fill(it, 1, 8, 0x33.toByte()) }
-        assertContentEquals(
-            MessageDigest.getInstance("SHA-256").digest(shifted),
-            sha256Consume(session),
-        )
+        assertContentEquals(sha256(secret), sha256Consume(session))
     }
 
     @Test
-    fun `fillDirect reads from index zero regardless of position`() {
+    fun `fillSession throws when Rust refuses the fill`(): Unit = withSession(8) { session ->
+        fillSession(session) { it.put(bytesOf(1, 8)) }
+        val error = assertFailsWith<SiegelNativeException> {
+            fillSession(session) { it.put(bytesOf(1, 8)) }
+        }
+        assertEquals(SiegelNative.FILL_ERR_WRONG_STATE, error.code)
+    }
+
+    @Test
+    fun `fillDirect ignores the position`(): Unit = withSession(8) { session ->
         // Locks the documented base-address semantics: the Java-side cursor is
         // ignored. `fillSession` is the guard-railed API; this asserts the
         // primitive behaves as documented rather than as a NIO cursor.
-        val session = SiegelSession(8u)
         val expected = bytesOf(0x5A, 8)
         val rc = withDirectSecretBuffer(8) { buffer ->
             buffer.put(expected)
@@ -284,10 +301,27 @@ class SiegelSessionTests {
             SiegelNative.fillDirect(session.handleId().toLong(), buffer, 8)
         }
         assertEquals(SiegelNative.FILL_OK, rc)
-        assertContentEquals(
-            MessageDigest.getInstance("SHA-256").digest(expected),
-            sha256Consume(session),
-        )
+        assertContentEquals(sha256(expected), sha256Consume(session))
+    }
+
+    @Test
+    fun `fillDirect reads a slice from the slice's base`(): Unit = withSession(8) { session ->
+        // `slice()` moves the JNI base address; its capacity is what's left.
+        val tail = bytesOf(0x22, 8)
+        val rc = withDirectSecretBuffer(16) { buffer ->
+            buffer.put(bytesOf(0x11, 8)).put(tail)
+            buffer.position(8)
+            SiegelNative.fillDirect(session.handleId().toLong(), buffer.slice(), 8)
+        }
+        assertEquals(SiegelNative.FILL_OK, rc)
+        assertContentEquals(sha256(tail), sha256Consume(session))
+    }
+
+    @Test
+    fun `wipe clears a heap buffer without throwing`() {
+        val heap = ByteBuffer.wrap(bytesOf(0x7F, 8))
+        heap.wipe()
+        assertContentEquals(ByteArray(8), heap.array())
     }
 
     @Test
@@ -317,5 +351,111 @@ class SiegelSessionTests {
         val readBack = ByteArray(16)
         escaped.duplicate().apply { clear() }.get(readBack)
         assertContentEquals(ByteArray(16), readBack)
+    }
+
+    @Test
+    fun `reseal then take returns sha256`() {
+        val secret = bytesOf(0x42, 16)
+        resealed(secret).use { output ->
+            assertFalse(output.isConsumed())
+            assertEquals(32u, output.len())
+
+            val (rc, digest) = takeRaw(output, 32)
+            assertEquals(SiegelNative.TAKE_OK, rc)
+            assertContentEquals(sha256(secret), digest)
+            assertTrue(output.isConsumed())
+        }
+    }
+
+    @Test
+    fun `takeSession hands over the secret and wipes it`() {
+        val secret = bytesOf(0x42, 16)
+        lateinit var escaped: ByteBuffer
+        val digest = resealed(secret).use { output ->
+            takeSession(output) { buffer ->
+                escaped = buffer
+                ByteArray(buffer.remaining()).also { buffer.get(it) }
+            }
+        }
+        assertContentEquals(sha256(secret), digest)
+        val readBack = ByteArray(32)
+        escaped.duplicate().apply { clear() }.get(readBack)
+        assertContentEquals(ByteArray(32), readBack)
+    }
+
+    @Test
+    fun `takeSession throws when Rust refuses the take`(): Unit = withSession(8) { session ->
+        assertEquals(SiegelNative.FILL_OK, fill(session, bytesOf(6, 8)))
+        val error = assertFailsWith<SiegelNativeException> { takeSession(session) { it } }
+        assertEquals(SiegelNative.TAKE_ERR_WRONG_STATE, error.code)
+    }
+
+    @Test
+    fun `written session can be passed back into rust`() {
+        resealed(bytesOf(0x42, 16)).use { output ->
+            assertContentEquals(sha256(sha256(bytesOf(0x42, 16))), sha256Consume(output))
+            assertEquals(SiegelNative.TAKE_ERR_WRONG_STATE, takeRaw(output, 32).first)
+        }
+    }
+
+    @Test
+    fun `take rejects unknown handle`() {
+        val rc = withDirectSecretBuffer(4) { SiegelNative.takeDirect(0xDEADL, it, 4) }
+        assertEquals(SiegelNative.TAKE_ERR_INVALID_HANDLE, rc)
+    }
+
+    @Test
+    fun `take rejects a heap-backed buffer`() {
+        resealed(bytesOf(1, 8)).use { output ->
+            val heap = ByteBuffer.allocate(32)
+            val rc = SiegelNative.takeDirect(output.handleId().toLong(), heap, 32)
+            assertEquals(SiegelNative.TAKE_ERR_NOT_DIRECT, rc)
+            assertFalse(output.isConsumed())
+        }
+    }
+
+    @Test
+    fun `take rejects length mismatch and recovers`() {
+        resealed(bytesOf(2, 8)).use { output ->
+            val (rc, bytes) = takeRaw(output, 16)
+            assertEquals(SiegelNative.TAKE_ERR_LEN_MISMATCH, rc)
+            assertContentEquals(bytesOf(SENTINEL, 16), bytes)
+            // Session is still takeable with a correctly sized buffer.
+            assertEquals(SiegelNative.TAKE_OK, takeRaw(output, 32).first)
+        }
+    }
+
+    @Test
+    fun `take rejects a session filled from native`(): Unit = withSession(8) { session ->
+        assertEquals(SiegelNative.FILL_OK, fill(session, bytesOf(6, 8)))
+
+        val (rc, bytes) = takeRaw(session, 8)
+        assertEquals(SiegelNative.TAKE_ERR_WRONG_STATE, rc)
+        assertContentEquals(bytesOf(SENTINEL, 8), bytes)
+        // The filled secret is still there for Rust to consume.
+        assertContentEquals(sha256(bytesOf(6, 8)), sha256Consume(session))
+    }
+
+    @Test
+    fun `take before write is rejected`(): Unit = withSession(8) { session ->
+        assertEquals(SiegelNative.TAKE_ERR_WRONG_STATE, takeRaw(session, 8).first)
+        assertFalse(session.isConsumed())
+    }
+
+    @Test
+    fun `second take is rejected`() {
+        resealed(bytesOf(3, 8)).use { output ->
+            assertEquals(SiegelNative.TAKE_OK, takeRaw(output, 32).first)
+
+            val (rc, bytes) = takeRaw(output, 32)
+            assertEquals(SiegelNative.TAKE_ERR_WRONG_STATE, rc)
+            assertContentEquals(bytesOf(SENTINEL, 32), bytes)
+        }
+    }
+
+    @Test
+    fun `reseal rejects empty input`(): Unit = withSession(8) { input ->
+        assertFailsWith<SessionError.InvalidState> { sha256Reseal(input) }
+        assertFalse(input.isConsumed())
     }
 }

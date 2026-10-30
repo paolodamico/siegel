@@ -85,7 +85,12 @@ impl SessionCore {
             Ok(session) => session,
             Err(e) => {
                 #[cfg(feature = "tracing")]
-                tracing::warn!(target: "siegel", capacity = len, error = %e, "opening a session failed");
+                tracing::warn!(
+                    target: "siegel",
+                    capacity = len,
+                    error = %e,
+                    "opening a session failed"
+                );
                 return Err(e);
             }
         };

@@ -2,6 +2,11 @@
 # Build siegel-boltffi as a host cdylib, generate Kotlin bindings, and compile
 # the JNI glue for the host JVM so the integration tests can run on a desktop
 # JDK.
+#
+# Usage: ./kotlin/build_boltffi_kotlin.sh [--test-utils]
+#
+#   --test-utils   Also export `sha256_consume`, `sha256_reseal` and the
+#                  guard-page segfault helper. Integration tests only.
 
 set -euo pipefail
 
@@ -22,7 +27,7 @@ TEST_UTILS=0
 for arg in "$@"; do
     case "$arg" in
         --test-utils) TEST_UTILS=1 ;;
-        --help|-h) sed -n '2,12p' "$0"; exit 0 ;;
+        --help|-h) sed -n '2,10p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $arg" >&2; exit 1 ;;
     esac
 done
@@ -49,20 +54,22 @@ case "$OSTYPE" in
     *) echo "Unsupported OS: $OSTYPE" >&2; exit 1 ;;
 esac
 
-rm -rf "$LIBS_DIR" "$GENERATED_DIR"
+cd "$PROJECT_ROOT"
+
+# `boltffi generate` writes into dist/android and step 2 copies from there, so
+# a stale tree would leak removed files into the test sources.
+rm -rf "$LIBS_DIR" "$GENERATED_DIR" "${CRATE_DIR:?}/dist/android"
 mkdir -p "$LIBS_DIR" "$GENERATED_DIR"
 
 # Ensure the CLI is using the same version as the dependency
-cargo metadata --format-version 1 >/dev/null
-RESOLVED="$(cargo pkgid boltffi 2>/dev/null | sed 's/.*[@#]//')"
+cargo metadata --format-version 1 --locked >/dev/null
+RESOLVED="$(cargo pkgid boltffi | sed 's/.*[@#]//')"
 INSTALLED="$(boltffi --version | awk '{print $NF}')"
 if [ -n "$RESOLVED" ] && [ "$INSTALLED" != "$RESOLVED" ]; then
     echo "boltffi CLI is $INSTALLED but cargo resolved boltffi $RESOLVED." >&2
     echo "Install the matching CLI: cargo install boltffi_cli --version $RESOLVED --locked" >&2
     exit 1
 fi
-
-cd "$PROJECT_ROOT"
 
 echo "Step 1: building host cdylib ($PACKAGE_NAME, features: $FEATURES)"
 # The `BOLTFFI_BINDING_EXPANSION*` environment is load-bearing, not incidental.
@@ -78,7 +85,7 @@ export BOLTFFI_BINDING_EXPANSION_ROOT="$CRATE_DIR"
 export BOLTFFI_BINDING_EXPANSION_SOURCE="$CRATE_DIR/src/lib.rs"
 export BOLTFFI_BINDING_EXPANSION_SURFACE="native"
 export BOLTFFI_BINDING_METADATA_FEATURES="$FEATURES"
-cargo build --package "$PACKAGE_NAME" --features "$FEATURES" --release
+cargo build --locked --package "$PACKAGE_NAME" --features "$FEATURES" --release
 
 RUST_LIB="$PROJECT_ROOT/target/release/lib${LIB_NAME}.${LIB_EXT}"
 [ -f "$RUST_LIB" ] || { echo "cdylib missing at $RUST_LIB" >&2; exit 1; }
@@ -94,7 +101,8 @@ echo "Step 2: generating Kotlin bindings + JNI glue"
 # Codegen expands the crate, so the feature set must match the cdylib built in
 # step 1 — otherwise `sha256_consume` is cfg'd out and the bindings won't
 # expose it.
-(cd "$CRATE_DIR" && boltffi generate kotlin --cargo-arg --features --cargo-arg "$FEATURES")
+(cd "$CRATE_DIR" && boltffi generate kotlin \
+    --cargo-arg --locked --cargo-arg --features --cargo-arg "$FEATURES")
 
 GEN_ROOT="$CRATE_DIR/dist/android/kotlin"
 [ -f "$GEN_ROOT/jni/jni_glue.c" ] || {
@@ -130,4 +138,4 @@ echo "  -> lib${LIB_NAME}_jni.${LIB_EXT}"
 
 echo
 echo "Artifacts in $LIBS_DIR:"
-ls -1 "$LIBS_DIR" | sed 's|^|  |'
+find "$LIBS_DIR" -mindepth 1 -maxdepth 1 -exec basename {} \; | sort | sed 's|^|  |'

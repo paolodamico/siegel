@@ -23,6 +23,7 @@ command -v boltffi >/dev/null 2>&1 || {
     exit 1
 }
 [ -f "$HANDWRITTEN" ] || { echo "missing $HANDWRITTEN" >&2; exit 1; }
+cd "$PROJECT_ROOT"
 
 # Fail with the actionable message rather than whatever a missing linker
 # produces three layers down.
@@ -34,8 +35,8 @@ if [ -z "${ANDROID_NDK_HOME:-}" ] && [ -z "${ANDROID_NDK_ROOT:-}" ] \
 fi
 
 # Ensure the CLI is using the same version as the dependency
-cargo metadata --format-version 1 >/dev/null
-RESOLVED="$(cargo pkgid boltffi 2>/dev/null | sed 's/.*[@#]//')"
+cargo metadata --format-version 1 --locked >/dev/null
+RESOLVED="$(cargo pkgid boltffi | sed 's/.*[@#]//')"
 INSTALLED="$(boltffi --version | awk '{print $NF}')"
 if [ -n "$RESOLVED" ] && [ "$INSTALLED" != "$RESOLVED" ]; then
     echo "boltffi CLI is $INSTALLED but cargo resolved boltffi $RESOLVED." >&2
@@ -48,7 +49,7 @@ cd "$CRATE_DIR"
 rm -rf "${CRATE_DIR:?}/dist/android"
 
 echo "Step 1: boltffi pack android --release"
-boltffi pack android --release --cargo-arg --features --cargo-arg jvm "$@"
+boltffi pack android --release --cargo-arg --locked --cargo-arg --features --cargo-arg jvm "$@"
 
 echo "Step 2: adding the hand-written JNI fill path"
 # Locate the generated bindings rather than assuming the configured output
