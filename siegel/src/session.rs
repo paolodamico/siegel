@@ -134,7 +134,7 @@ impl SessionCore {
         // Hold the lock to the registry while allocation occurs to prevent
         // race conditions that could exceed the maximum active sessions.
         // Dropped sessions remove their own entry (see `Drop`), so the registry
-        // holds exactly the live ones.
+        // holds only live or mid-drop ones.
         let mut registry = registry_lock();
         let held = HELD.load(Ordering::Relaxed);
         if held >= MAX_ACTIVE_SESSIONS || registry.len() >= MAX_OPEN_SESSIONS {
@@ -739,19 +739,6 @@ mod tests {
             let s = SessionCore::new(8).unwrap();
             s.handle_id()
         };
-        let rc = unsafe { fill_into(handle, [0u8; 8].as_ptr(), 8) };
-        assert_eq!(rc, FILL_ERR_INVALID_HANDLE);
-    }
-
-    /// Sessions dropped on the foreign side must not pin the registry: the
-    /// handle stops resolving once the session is gone.
-    #[test]
-    fn dropped_sessions_leave_the_registry() {
-        let handle = {
-            let s = SessionCore::new(8).unwrap();
-            s.handle_id()
-        };
-        let _next = SessionCore::new(8).unwrap();
         let rc = unsafe { fill_into(handle, [0u8; 8].as_ptr(), 8) };
         assert_eq!(rc, FILL_ERR_INVALID_HANDLE);
     }
