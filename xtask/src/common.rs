@@ -363,15 +363,14 @@ pub fn uniffi_generate(root: &Path, library: &Path, language: &str, out_dir: &Pa
 
 #[cfg(test)]
 mod tests {
-    use super::{find_in, list_entries};
+    use super::{create_temp_dir, find_in, list_entries};
 
     #[cfg(unix)]
     #[test]
     fn finds_the_first_executable_on_the_search_path() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let root = std::env::temp_dir().join("xtask_common_find_in");
-        let _ = std::fs::remove_dir_all(&root);
+        let root = create_temp_dir("xtask-find-in").unwrap();
         let (plain, exec) = (root.join("plain"), root.join("exec"));
         std::fs::create_dir_all(&plain).unwrap();
         std::fs::create_dir_all(&exec).unwrap();
@@ -389,8 +388,7 @@ mod tests {
 
     #[test]
     fn lists_entries_depth_first_and_honours_max_depth() {
-        let root = std::env::temp_dir().join("xtask_common_list_entries");
-        let _ = std::fs::remove_dir_all(&root);
+        let root = create_temp_dir("xtask-list-entries").unwrap();
         std::fs::create_dir_all(root.join("jniLibs/arm64-v8a")).unwrap();
         std::fs::create_dir_all(root.join("kotlin")).unwrap();
         std::fs::write(root.join("jniLibs/arm64-v8a/libsiegel.so"), "").unwrap();

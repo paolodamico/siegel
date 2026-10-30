@@ -271,7 +271,15 @@ fn build_boltffi(sim_only: bool, test_utils: bool) -> Result<()> {
 
 /// Fail if a release XCFramework exports the `test-utils` hooks.
 fn ensure_no_test_symbols(framework: &Path) -> Result<()> {
-    for lib in find_by_extension(framework, "a")? {
+    let libs = find_by_extension(framework, "a")?;
+    // Nothing to inspect would otherwise pass as clean.
+    if libs.is_empty() {
+        bail!(
+            "no static libraries under {} to check for test symbols",
+            framework.display()
+        );
+    }
+    for lib in libs {
         let symbols = capture(Command::new("nm").arg("-gU").arg(&lib))?;
         if symbols.contains("unsafe_test_only_") {
             bail!(
