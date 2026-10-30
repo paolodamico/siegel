@@ -113,7 +113,10 @@ fn failed_seals_free_their_slot() {
     let sessions = fill_up();
 
     siegel::test_utils::fail_next_reseal();
-    assert!(sessions[0].fill(&[1]).is_err());
+    assert!(matches!(
+        sessions[0].fill(&[1]),
+        Err(SessionError::ProtectionFailed { .. })
+    ));
     let mut out = [0u8; 1];
     siegel::test_utils::fail_next_reseal();
     assert_ne!(
@@ -124,7 +127,10 @@ fn failed_seals_free_their_slot() {
 
     // `new_written` takes a free slot, then fails sealing and gives it back.
     siegel::test_utils::fail_next_reseal();
-    assert!(SessionCore::new_written(1, |_| Ok::<_, Infallible>(())).is_err());
+    assert!(matches!(
+        SessionCore::new_written(1, |_| Ok::<_, Infallible>(())),
+        Err(SessionError::ProtectionFailed { .. })
+    ));
     assert_free_slots(2);
 }
 
@@ -144,8 +150,8 @@ fn in_flight_read_keeps_its_slot() {
     assert_free_slots(1);
 }
 
-/// Consumed sessions that are never released are bounded too, or a leak
-/// would grow the registry every `new` scans without limit.
+/// Consumed sessions that are never released are bounded too, or a leak would
+/// grow the registry without limit.
 #[test]
 fn open_sessions_are_bounded() {
     let _cap = exclusive();
