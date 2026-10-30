@@ -27,8 +27,8 @@ public object SiegelNative {
     /**
      * Low-level take. Prefer [takeSession].
      *
-     * Copies a secret Rust wrote into a **direct** [buffer] whose capacity is
-     * exactly [len] (the session's capacity), then wipes and consumes the
+     * Copies a secret Rust wrote into a **writable direct** [buffer] whose capacity
+     * is exactly [len] (the session's capacity), then wipes and consumes the
      * session. Writes at the buffer's JNI base address. Zeroizing [buffer]
      * afterwards is the caller's job.
      *
@@ -87,7 +87,7 @@ private fun takeFailure(code: Int): SiegelNativeException {
         SiegelNative.TAKE_ERR_WRONG_STATE -> "no Rust-written secret, or it was already taken"
         SiegelNative.TAKE_ERR_PROTECTION -> "unsealing failed; the session is consumed"
         SiegelNative.TAKE_ERR_CANARY -> "canary check failed: possible memory corruption"
-        SiegelNative.TAKE_ERR_NOT_DIRECT -> "not a direct ByteBuffer"
+        SiegelNative.TAKE_ERR_NOT_DIRECT -> "not a writable direct ByteBuffer"
         else -> "unexpected failure"
     }
     return SiegelNativeException(code, "take failed ($code): $reason")
@@ -98,9 +98,11 @@ private fun takeFailure(code: Int): SiegelNativeException {
  * `finally`.
  *
  * Only fully effective on a direct buffer: on a heap-backed buffer this wipes the
- * one copy you can reach and leaves any GC-relocated duplicates intact.
+ * one copy you can reach and leaves any GC-relocated duplicates intact. A
+ * read-only view is left as is; wipe the buffer it views (as [takeSession] does).
  */
 public fun ByteBuffer.wipe() {
+    if (isReadOnly) return
     // Overwrite in place: allocating here could fail under memory pressure and
     // leave the secret resident.
     val view = duplicate().apply { clear() }

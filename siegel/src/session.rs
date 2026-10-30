@@ -2,7 +2,7 @@
 //! to use [`crate::Siegel`]. This module is binding-framework agnostic.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, Weak};
 
 use zeroize::Zeroize;
@@ -24,9 +24,7 @@ type Registry = Mutex<HashMap<u64, Weak<SessionCore>>>;
 /// deallocated pointers. More commonly it avoids accidental use after drop.
 static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Sessions still holding protected memory. The cap counts these rather than
-/// registry entries, so a consumed session that foreign code never released
-/// does not use up a slot.
+/// Live [`Slot`]s: protected regions owned by sessions.
 static HELD: AtomicUsize = AtomicUsize::new(0);
 
 /// Max sessions holding protected memory at once. Consumed sessions don't
@@ -40,6 +38,12 @@ static HELD: AtomicUsize = AtomicUsize::new(0);
 /// process embedding a binding crate *and* calling [`SessionCore`] directly
 /// draws from one budget.
 pub const MAX_ACTIVE_SESSIONS: usize = 1024;
+
+/// Max sessions alive at once, consumed or not. A consumed session holds no
+/// protected memory, but one foreign code never releases still costs a
+/// registry entry that every [`SessionCore::new`] scans under the lock, so
+/// unbounded leaks are refused rather than slowing every caller down.
+pub const MAX_OPEN_SESSIONS: usize = 16 * MAX_ACTIVE_SESSIONS;
 
 /// Maximum tries to get a non-collision handle. Extremely unlikely to ever occur.
 const MAX_HANDLE_ALLOC_RETRIES: u8 = 8;
@@ -59,8 +63,25 @@ pub struct SessionCore {
     handle_id: u64,
     /// Bytes the session was allocated for. Stable for its lifetime.
     capacity: u32,
-    /// Whether this session still counts toward [`HELD`].
-    held: AtomicBool,
+}
+
+/// One unit of [`MAX_ACTIVE_SESSIONS`], travelling with the protected region it
+/// accounts for and released when that region is dropped, including on unwind
+/// and while a read holds it outside the state lock.
+struct Slot(());
+
+impl Slot {
+    /// Callers must hold the registry lock and have checked the cap.
+    fn acquire() -> Self {
+        HELD.fetch_add(1, Ordering::Relaxed);
+        Self(())
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        HELD.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl SessionCore {
@@ -74,7 +95,7 @@ impl SessionCore {
     ///
     /// `SessionError::InvalidLength` for `len == 0` or `len > 1 MiB`.
     /// `SessionError::TooManyActiveSessions` if [`MAX_ACTIVE_SESSIONS`] sessions
-    /// already hold protected memory.
+    /// already hold protected memory, or [`MAX_OPEN_SESSIONS`] are alive.
     /// Allocation / protection errors propagate from `siegel`. A failed `mlock`
     /// does not fail the constructor; query [`is_locked`](Self::is_locked).
     pub fn new(len: u32) -> Result<Arc<Self>, SessionError> {
@@ -114,22 +135,24 @@ impl SessionCore {
         // race conditions that could exceed the maximum active sessions.
         let mut registry = registry_lock();
         registry.retain(|_, w| w.strong_count() > 0); // Prune dropped entries
-        if HELD.load(Ordering::Relaxed) >= MAX_ACTIVE_SESSIONS {
+        let held = HELD.load(Ordering::Relaxed);
+        if held >= MAX_ACTIVE_SESSIONS || registry.len() >= MAX_OPEN_SESSIONS {
             // Checked before allocation to avoid wasting resources
-            return Err(SessionError::TooManyActiveSessions);
+            return Err(SessionError::TooManyActiveSessions {
+                held,
+                open: registry.len(),
+            });
         }
 
         let empty = Siegel::<Empty>::new(len_usize)?;
         let handle_id = allocate_handle_id(&registry)?;
 
-        // Incremented under the registry lock, so concurrent `new`s can't both
-        // pass the check above. Releases may land anywhere; they only lower it.
-        HELD.fetch_add(1, Ordering::Relaxed);
+        // Acquired under the registry lock, so concurrent `new`s can't both pass
+        // the check above. Releases may land anywhere; they only lower it.
         let session = Arc::new(Self {
-            state: Mutex::new(SessionState::Empty(empty)),
+            state: Mutex::new(SessionState::Empty(empty, Slot::acquire())),
             handle_id,
             capacity: len,
-            held: AtomicBool::new(true),
         });
         registry.insert(handle_id, Arc::downgrade(&session));
         Ok(session)
@@ -150,7 +173,8 @@ impl SessionCore {
     {
         let session = Self::new(len)?;
         let mut state = lock_state(&session.state);
-        let SessionState::Empty(empty) = std::mem::replace(&mut *state, SessionState::Consumed)
+        let SessionState::Empty(empty, slot) =
+            std::mem::replace(&mut *state, SessionState::Consumed)
         else {
             // Unreachable: `session` is fresh and unshared.
             return Err(SessionError::InvalidState);
@@ -161,7 +185,7 @@ impl SessionCore {
             // `write_with` already zeroized the partial output.
             Err(e) => return Ok(Err(e)),
         };
-        *state = SessionState::Written(written);
+        *state = SessionState::Written(written, slot);
         drop(state);
         Ok(Ok(session))
     }
@@ -195,8 +219,6 @@ impl SessionCore {
     pub fn obliviate(&self) {
         let mut state = lock_state(&self.state);
         *state = SessionState::Consumed; // automatically drops any loaded `Siegel`
-        drop(state);
-        self.release_slot();
     }
 
     /// Whether the session has been consumed or otherwise reached
@@ -212,8 +234,8 @@ impl SessionCore {
     #[must_use]
     pub fn is_locked(&self) -> bool {
         match &*lock_state(&self.state) {
-            SessionState::Empty(s) => s.is_locked(),
-            SessionState::Filled(s) | SessionState::Written(s) => s.is_locked(),
+            SessionState::Empty(s, _) => s.is_locked(),
+            SessionState::Filled(s, _) | SessionState::Written(s, _) => s.is_locked(),
             SessionState::Consumed => false,
         }
     }
@@ -243,8 +265,8 @@ impl SessionCore {
         let mut state = lock_state(&self.state);
 
         // Set a `Consumed` state to ensure it is persisted on errors.
-        let empty = match std::mem::replace(&mut *state, SessionState::Consumed) {
-            SessionState::Empty(s) => s,
+        let (empty, slot) = match std::mem::replace(&mut *state, SessionState::Consumed) {
+            SessionState::Empty(s, slot) => (s, slot),
             other => {
                 *state = other;
                 return Err(SessionError::InvalidState);
@@ -252,20 +274,20 @@ impl SessionCore {
         };
 
         if empty.len() != len {
-            *state = SessionState::Empty(empty);
+            *state = SessionState::Empty(empty, slot);
             return Err(SessionError::LengthMismatch);
         }
 
         match empty.write(bytes()) {
             Ok(loaded) => {
-                *state = SessionState::Filled(loaded);
+                *state = SessionState::Filled(loaded, slot);
                 Ok(())
             }
             Err(e) => {
                 // Siegel::write consumed `empty` on failure. State stays Consumed.
                 // Release before emitting, for the same reason as in `new`.
                 drop(state);
-                self.release_slot();
+                drop(slot);
                 #[cfg(feature = "tracing")]
                 tracing::warn!(
                     target: "siegel",
@@ -289,12 +311,12 @@ impl SessionCore {
     where
         F: FnOnce(&[u8]) -> T,
     {
-        let loaded = {
+        let (loaded, slot) = {
             let mut state = lock_state(&self.state);
             match std::mem::replace(&mut *state, SessionState::Consumed) {
-                SessionState::Filled(s) | SessionState::Written(s) => s,
-                SessionState::Empty(s) => {
-                    *state = SessionState::Empty(s);
+                SessionState::Filled(s, slot) | SessionState::Written(s, slot) => (s, slot),
+                SessionState::Empty(s, slot) => {
+                    *state = SessionState::Empty(s, slot);
                     return Err(SessionError::InvalidState);
                 }
                 SessionState::Consumed => return Err(SessionError::Consumed),
@@ -302,7 +324,7 @@ impl SessionCore {
         };
 
         let result = loaded.read_once(f);
-        self.release_slot();
+        drop(slot);
         #[cfg(feature = "tracing")]
         if let Err(e) = &result {
             tracing::warn!(target: "siegel", error = %e, "reading the secret failed");
@@ -317,8 +339,8 @@ impl SessionCore {
     unsafe fn take(&self, dst: *mut u8, len: usize) -> i32 {
         let mut state = lock_state(&self.state);
 
-        let written = match std::mem::replace(&mut *state, SessionState::Consumed) {
-            SessionState::Written(s) => s,
+        let (written, slot) = match std::mem::replace(&mut *state, SessionState::Consumed) {
+            SessionState::Written(s, slot) => (s, slot),
             other => {
                 *state = other;
                 return TAKE_ERR_WRONG_STATE;
@@ -326,7 +348,7 @@ impl SessionCore {
         };
 
         if written.len() != len {
-            *state = SessionState::Written(written);
+            *state = SessionState::Written(written, slot);
             return TAKE_ERR_LEN_MISMATCH;
         }
 
@@ -336,7 +358,7 @@ impl SessionCore {
         });
         // Siegel::read_once consumed `written` either way. State stays Consumed.
         drop(state);
-        self.release_slot();
+        drop(slot);
 
         let Err(e) = copied else {
             return TAKE_OK;
@@ -359,18 +381,10 @@ impl SessionCore {
             | SiegelError::LengthMismatch { .. } => TAKE_ERR_PROTECTION,
         }
     }
-
-    /// Stop counting this session toward [`MAX_ACTIVE_SESSIONS`]. Idempotent.
-    fn release_slot(&self) {
-        if self.held.swap(false, Ordering::Relaxed) {
-            HELD.fetch_sub(1, Ordering::Relaxed);
-        }
-    }
 }
 
 impl Drop for SessionCore {
     fn drop(&mut self) {
-        self.release_slot();
         // Only evict our own entry: if a concurrent prune already removed it,
         // the id may since have been issued to a live session.
         let mut registry = registry_lock();
@@ -496,13 +510,13 @@ fn lookup(handle: u64) -> Option<Arc<SessionCore>> {
     registry_lock().get(&handle).and_then(Weak::upgrade)
 }
 
-/// The state of the session.
+/// The state of the session. Every state holding a region holds its [`Slot`].
 enum SessionState {
-    Empty(Siegel<Empty>),
+    Empty(Siegel<Empty>, Slot),
     /// Filled by foreign code ([`fill_into`]); only Rust can read it.
-    Filled(Siegel<Loaded>),
+    Filled(Siegel<Loaded>, Slot),
     /// Written by Rust ([`SessionCore::new_written`]); Rust or [`take_into`] can read it.
-    Written(Siegel<Loaded>),
+    Written(Siegel<Loaded>, Slot),
     Consumed,
 }
 
@@ -545,8 +559,11 @@ pub enum SessionError {
     InvalidState,
     #[error("session has been consumed")]
     Consumed,
-    #[error("too many active sessions (max {MAX_ACTIVE_SESSIONS})")]
-    TooManyActiveSessions,
+    #[error(
+        "too many sessions: {held} holding secrets (max {MAX_ACTIVE_SESSIONS}), {open} open \
+         (max {MAX_OPEN_SESSIONS}); are sessions being released?"
+    )]
+    TooManyActiveSessions { held: usize, open: usize },
     #[error("memory allocation failed: {reason}")]
     AllocationFailed { reason: String },
     #[error("memory protection failed: {reason}")]
@@ -585,8 +602,8 @@ impl SessionCore {
     pub unsafe fn test_touch_front_guard(&self) {
         let state = lock_state(&self.state);
         match &*state {
-            SessionState::Empty(s) => unsafe { s.test_touch_front_guard() },
-            SessionState::Filled(s) | SessionState::Written(s) => unsafe {
+            SessionState::Empty(s, _) => unsafe { s.test_touch_front_guard() },
+            SessionState::Filled(s, _) | SessionState::Written(s, _) => unsafe {
                 s.test_touch_front_guard();
             },
             SessionState::Consumed => {}
@@ -862,6 +879,7 @@ mod tests {
         assert!(matches!(err, SessionError::InvalidState));
     }
 
+    #[cfg(feature = "test-utils")]
     #[test]
     fn fill_wipes_and_consumes_when_seal_fails() {
         let s = SessionCore::new(8).unwrap();
@@ -1046,7 +1064,7 @@ mod tests {
     fn take_reports_canary_corruption_and_consumes() {
         let s = written(&[0xEE; 8]);
         // Zeroizing wipes the canary along with the data.
-        if let SessionState::Written(siegel) = &mut *lock_state(&s.state) {
+        if let SessionState::Written(siegel, _) = &mut *lock_state(&s.state) {
             siegel.zeroize();
         }
         let mut out = [SENTINEL; 8];
@@ -1055,6 +1073,7 @@ mod tests {
         assert!(s.is_consumed());
     }
 
+    #[cfg(feature = "test-utils")]
     #[test]
     fn take_wipes_dst_when_reseal_fails_after_copy() {
         let s = written(&[0xC3; 8]);

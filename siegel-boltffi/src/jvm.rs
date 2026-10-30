@@ -29,7 +29,7 @@
 use jni::errors::ThrowRuntimeExAndDefault;
 use jni::objects::{JByteBuffer, JClass};
 use jni::sys::{jint, jlong};
-use jni::{Env, EnvUnowned};
+use jni::{Env, EnvUnowned, jni_sig, jni_str};
 
 use siegel::session::{
     FILL_ERR_LEN_MISMATCH, FILL_ERR_NULL_SRC, TAKE_ERR_LEN_MISMATCH, TAKE_ERR_NULL_DST,
@@ -43,11 +43,13 @@ pub const FILL_ERR_NOT_DIRECT: jint = -6;
 /// thrown Java exception.
 pub const FILL_ERR_JNI: jint = -7;
 
-/// [`FILL_ERR_NOT_DIRECT`] for `takeDirect`. Renumbered because `-6` is
-/// [`TAKE_ERR_CANARY`](siegel::session::TAKE_ERR_CANARY).
+/// [`FILL_ERR_NOT_DIRECT`] for `takeDirect`, which also refuses a read-only
+/// buffer (writing a `READ_ONLY` mapping would fault). Renumbered because `-6`
+/// is [`TAKE_ERR_CANARY`](siegel::session::TAKE_ERR_CANARY).
 pub const TAKE_ERR_NOT_DIRECT: jint = -7;
 
-/// [`FILL_ERR_JNI`] for `takeDirect`.
+/// [`FILL_ERR_JNI`] for `takeDirect`, which also returns it when the
+/// `isReadOnly()` call fails (with the Java exception left pending).
 pub const TAKE_ERR_JNI: jint = -8;
 
 /// Return code wrapper whose `Default` is a *failure*.
@@ -189,8 +191,18 @@ pub extern "system" fn Java_dev_siegel_SiegelNative_takeDirect<'local>(
             Err(BufferError::LenMismatch) => return Ok(TakeCode(TAKE_ERR_LEN_MISMATCH)),
         };
 
-        // SAFETY: `addr` is the base of a direct buffer of exactly `len` bytes,
-        // off-heap and so disjoint from the session's protected memory.
+        // JNI hands back the address of a read-only buffer too.
+        if env
+            .call_method(&buffer, jni_str!("isReadOnly"), jni_sig!("()Z"), &[])?
+            .z()?
+        {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(target: "siegel", op = "takeDirect", "refusing a read-only ByteBuffer");
+            return Ok(TakeCode(TAKE_ERR_NOT_DIRECT));
+        }
+
+        // SAFETY: `addr` is the base of a writable direct buffer of exactly `len`
+        // bytes, off-heap and so disjoint from the session's protected memory.
         Ok(TakeCode(unsafe {
             siegel::session::take_into(handle_from(handle), addr, len)
         }))

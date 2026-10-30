@@ -415,6 +415,24 @@ class SiegelSessionTests {
     }
 
     @Test
+    fun `take rejects a read-only buffer`() {
+        resealed(bytesOf(1, 8)).use { output ->
+            val readOnly = ByteBuffer.allocateDirect(32).asReadOnlyBuffer()
+            val rc = SiegelNative.takeDirect(output.handleId().toLong(), readOnly, 32)
+            assertEquals(SiegelNative.TAKE_ERR_NOT_DIRECT, rc)
+            assertFalse(output.isConsumed())
+        }
+    }
+
+    @Test
+    fun `wipe leaves a read-only view alone`() {
+        val buffer = ByteBuffer.allocateDirect(8).put(bytesOf(0x7F, 8))
+        buffer.asReadOnlyBuffer().wipe() // must not throw from a `finally`
+        buffer.wipe()
+        assertContentEquals(ByteArray(8), ByteArray(8).also { buffer.duplicate().clear().get(it) })
+    }
+
+    @Test
     fun `take rejects length mismatch and recovers`() {
         resealed(bytesOf(2, 8)).use { output ->
             val (rc, bytes) = takeRaw(output, 16)
