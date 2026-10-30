@@ -31,7 +31,7 @@ thiserror = { workspace = true }
 # Exact: the macro emits the `extern "C"` surface the CLI-generated glue calls,
 # with no compatibility check between the two. Bump together with the CLI.
 boltffi = "=0.29.3"
-sha2 = { version = "0.10", optional = true }
+sha2 = { workspace = true, optional = true }
 tracing = { version = "0.1", optional = true, default-features = false }
 
 [target.'cfg(any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
@@ -44,7 +44,7 @@ jni = { version = "0.22.4", optional = true }
 features = ["jvm"]
 
 [dev-dependencies]
-sha2 = "0.10"
+sha2 = { workspace = true }
 
 [lints]
 workspace = true

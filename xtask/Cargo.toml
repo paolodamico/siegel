@@ -1,0 +1,22 @@
+[package]
+name = "xtask"
+description = "Build and test automation for the Siegel foreign bindings."
+publish = false
+
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+# Deliberately omits workspace lints (doesn't allow print)
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive"] }
+sha2 = { workspace = true }

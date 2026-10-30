@@ -1,5 +1,5 @@
 [workspace]
-members = ["siegel", "siegel-boltffi", "siegel-uniffi", "uniffi-bindgen"]
+members = ["siegel", "siegel-boltffi", "siegel-uniffi", "uniffi-bindgen", "xtask"]
 # Resolver 3 is MSRV-aware, so `cargo update` keeps the lockfile buildable on
 # 1.85 (resolver 2 picks e.g. icu_* 2.3 via boltffi -> url -> idna, needing 1.88).
 resolver = "3"
@@ -20,6 +20,7 @@ repository = "https://github.com/paolodamico/siegel"
 uniffi = { version = "0.32", default-features = false }
 thiserror = { version = "2" }
 siegel = { version = "0.3.0", path = "siegel" }
+sha2 = { version = "0.10" }
 
 [profile.release]
 debug = false

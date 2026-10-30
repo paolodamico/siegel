@@ -5,13 +5,13 @@ Contains integration tests for foreign Swift bindings of `Siegel` and Swift pack
 ## Build the XCFramework
 
 ```bash
-./swift/build_swift.sh
+cargo xtask swift build
 ```
 
 ## Run the integration tests
 
 ```bash
-./swift/test_swift.sh
+cargo xtask swift test
 ```
 
 Builds the framework, copies the generated Swift into `swift/tests/`, picks an
@@ -22,11 +22,13 @@ available iPhone simulator, and runs the XCTest suite via `xcodebuild test`.
 This directory tests both binding crates. The runner takes the binding as an argument:
 
 ```sh
-./swift/test_swift.sh uniffi
-./swift/test_swift.sh boltffi
+cargo xtask swift test uniffi
+cargo xtask swift test boltffi
 ```
+
+Set `VERBOSE=1` to stream the full `xcodebuild` log instead of the filtered one.
 
 | package | crate | built by |
 |---------|-------|----------|
-| `tests/` | `siegel-uniffi` | `build_swift.sh` |
-| `boltffi-tests/` | `siegel-boltffi` | `build_boltffi_swift.sh` (wraps `boltffi pack apple`) |
+| `tests/` | `siegel-uniffi` | `cargo xtask swift build uniffi` |
+| `boltffi-tests/` | `siegel-boltffi` | `cargo xtask swift build boltffi` (wraps `boltffi pack apple`) |

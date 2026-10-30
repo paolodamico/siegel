@@ -77,26 +77,22 @@ Requires the `boltffi` CLI, at exactly the version `Cargo.lock` pins:
 cargo install boltffi_cli --version "$(cargo pkgid boltffi | sed 's/.*[@#]//')" --locked
 ```
 
-The CLI version must equal the resolved `boltffi` version: the macro emits the
-FFI symbols and the CLI generates the glue that calls them, with no
-compatibility check between the two, so a mismatch fails at runtime with
-`undefined symbol` rather than at link time. The build scripts verify it and
-refuse to run on a mismatch, naming the version to install.
+The CLI version must equal the resolved `boltffi` version, otherwise this could lead to an `undefined symbol` error.
 
 Then, from the repository root:
 
 ```sh
-./swift/build_boltffi_swift.sh
-./kotlin/build_boltffi_kotlin.sh
+cargo xtask swift build boltffi
+cargo xtask kotlin build boltffi
 ```
 
 For Android distribution:
 
 ```sh
-./kotlin/build_boltffi_android.sh   # needs the Android NDK
+cargo xtask kotlin android   # needs the Android NDK
 ```
 
 This runs `boltffi pack android --release` (emitting `jniLibs/` for all four ABIs) and then adds `SiegelNative.kt`. Running `boltffi pack android` on its own produces an incomplete package: the generated `Siegel.kt` exposes the session class but no way to fill it.
 
 > [!IMPORTANT]
-> `boltffi pack` sets the `BOLTFFI_BINDING_*` environment itself. A direct `cargo build` of the cdylib, as `build_boltffi_kotlin.sh` does, must set it too: without it the macro selects its legacy expansion and emits different symbol names than the generated glue targets, failing with `undefined symbol` at runtime.
+> `boltffi pack` sets the `BOLTFFI_BINDING_*` environment itself. A direct `cargo build` of the cdylib, as `cargo xtask kotlin build boltffi` does, must set it too: without it the macro selects its legacy expansion and emits different symbol names than the generated glue targets, failing with `undefined symbol` at runtime.
