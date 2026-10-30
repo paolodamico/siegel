@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use boltffi::export;
-use siegel::session::{self, MAX_ACTIVE_SESSIONS, SessionCore};
+use siegel::session::{self, MAX_ACTIVE_SESSIONS, MAX_OPEN_SESSIONS, SessionCore};
 
 pub use siegel::session::{
     FILL_ERR_INVALID_HANDLE, FILL_ERR_LEN_MISMATCH, FILL_ERR_NULL_SRC, FILL_ERR_PROTECTION,
@@ -184,7 +184,10 @@ pub enum SessionError {
     InvalidState,
     #[error("session has been consumed")]
     Consumed,
-    #[error("too many active sessions (max {MAX_ACTIVE_SESSIONS})")]
+    #[error(
+        "too many sessions (max {MAX_ACTIVE_SESSIONS} holding secrets, {MAX_OPEN_SESSIONS} \
+         open); are sessions being released?"
+    )]
     TooManyActiveSessions,
     #[error("memory allocation failed: {reason}")]
     AllocationFailed { reason: String },
@@ -204,7 +207,7 @@ impl From<session::SessionError> for SessionError {
             Core::LengthMismatch => Self::LengthMismatch,
             Core::InvalidState => Self::InvalidState,
             Core::Consumed => Self::Consumed,
-            Core::TooManyActiveSessions => Self::TooManyActiveSessions,
+            Core::TooManyActiveSessions { .. } => Self::TooManyActiveSessions,
             Core::AllocationFailed { reason } => Self::AllocationFailed { reason },
             Core::ProtectionFailed { reason } => Self::ProtectionFailed { reason },
             Core::CanaryCorrupted => Self::CanaryCorrupted,

@@ -47,7 +47,7 @@ The design focuses on making it harder to do unsafe behavior. For example, it ta
 
 ## Features
 
-- `session`: the handle-based [`session`](https://docs.rs/siegel/latest/siegel/session/) layer the binding crates build on: a process-wide registry of up to 1024 live sessions and the raw `fill_into` / `take_into` entry points. Not needed by pure-Rust callers.
+- `session`: the handle-based [`session`](https://docs.rs/siegel/latest/siegel/session/) layer the binding crates build on: a process-wide handle registry, capped at 1024 sessions holding protected memory (16384 open in total), and the raw `fill_into` / `take_into` entry points. Not needed by pure-Rust callers.
 - `tracing`: warns on `mlock` failure, rejected raw calls and memory failures, under the `siegel` target.
 - `test-utils`: test-only hooks (guard-page probes, injected reseal failures) shared with the binding crates' suites. Never ship it.
 
