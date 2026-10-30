@@ -1,0 +1,50 @@
+[package]
+name = "siegel-boltffi"
+description = "BoltFFI bindings for Siegel. Enables sharing memory-protected secrets between foreign code and Rust."
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+# `boltffi` uses let chains, so 1.88 rather than the workspace 1.85.
+rust-version = "1.88"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+# CI-only overlay; its own header says it is not for production builds.
+exclude = ["boltffi.ci.toml"]
+
+[lib]
+name = "siegel_boltffi"
+# boltffi requires staticlib for Apple; cdylib for Android
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[features]
+# Not for production use. Enables foreign tests.
+test-utils = ["dep:sha2", "siegel/test-utils"]
+# additional intermediate logging useful for debugging and security information
+tracing = ["dep:tracing", "siegel/tracing"]
+# Enables the JNI (Java Native Interface) fill path. Required on Android.
+jvm = ["dep:jni"]
+
+[dependencies]
+siegel = { workspace = true, features = ["session"] }
+thiserror = { workspace = true }
+# Exact: the macro emits the `extern "C"` surface the CLI-generated glue calls,
+# with no compatibility check between the two. Bump together with the CLI.
+boltffi = "=0.29.3"
+sha2 = { version = "0.10", optional = true }
+tracing = { version = "0.1", optional = true, default-features = false }
+
+[target.'cfg(any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+jni = { version = "0.22.4", optional = true }
+
+[package.metadata.docs.rs]
+# `jvm` is off by default, so without this the JNI fill path — the API the
+# Kotlin docs tell consumers to call — is neither doc-checked under
+# `RUSTDOCFLAGS: -Dwarnings` nor published.
+features = ["jvm"]
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[lints]
+workspace = true

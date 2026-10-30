@@ -1,0 +1,39 @@
+[package]
+name = "siegel"
+crate = "siegel-boltffi"
+
+[targets.apple]
+enabled = true
+deployment_target = "13.0" # Matches IPHONEOS_DEPLOYMENT_TARGET in swift/build_swift.sh.
+ios_architectures = ["arm64"]
+simulator_architectures = ["arm64", "x86_64"]
+
+[targets.apple.swift]
+module_name = "Siegel"
+
+[targets.android]
+enabled = true
+
+[targets.android.kotlin]
+package = "dev.siegel"
+
+# Host-JVM (desktop) packaging, used by the Kotlin integration tests
+[targets.android.kotlin.desktop_pack]
+enabled = true
+
+# Disable the targets we don't ship. WASM in particular cannot uphold siegel's
+# guarantees: it has no mmap, mprotect, guard pages, or mlock.
+[targets.wasm]
+enabled = false
+
+[targets.java]
+enabled = false
+
+[targets.python]
+enabled = false
+
+[targets.csharp]
+enabled = false
+
+[targets.dart]
+enabled = false

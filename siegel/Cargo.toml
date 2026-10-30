@@ -4,6 +4,7 @@ description = "Protected memory management for one-time use secrets."
 readme = "README.md"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -14,16 +15,26 @@ name = "siegel"
 [features]
 # Exposes unsafe helpers for tests
 test-utils = []
+# Handle-based session layer consumed by the binding crates. Adds a global
+# handle registry; not needed by pure-Rust callers.
+session = ["dep:getrandom"]
+# Additional intermediate logging useful for debugging and security information
+tracing = ["dep:tracing"]
 
 [dependencies]
 libc = "0.2"
 thiserror = { workspace = true }
 zeroize = { version = "1", features = ["derive"] }
+getrandom = { version = "0.4", optional = true }
+tracing = { version = "0.1", optional = true, default-features = false }
 
 [dev-dependencies]
 sha2 = "0.10"
 # Self-reference so unit tests can use the `test-utils` reseal-failure hook.
 siegel = { path = ".", features = ["test-utils"] }
+
+[package.metadata.docs.rs]
+features = ["session"]
 
 [lints]
 workspace = true

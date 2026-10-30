@@ -17,3 +17,4 @@ dependencyResolutionManagement {
 rootProject.name = "siegel"
 
 include(":siegel-tests")
+include(":siegel-boltffi-tests")

@@ -7,10 +7,12 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 mod protected;
 pub use protected::{ProtectedRegion, ProtectionError};
 
+#[cfg(feature = "session")]
+pub mod session;
+
+/// Test-only helpers shared by the binding crates. Not for production use.
 #[cfg(feature = "test-utils")]
-mod test_utils;
-#[cfg(feature = "test-utils")]
-pub use test_utils::fail_next_reseal;
+pub mod test_utils;
 
 /// Container for a single secret in protected memory. Type safe.
 ///
@@ -42,7 +44,8 @@ impl Siegel<Empty> {
     ///
     /// # Errors
     /// - `SiegelError::InvalidLength` (on well, invalid length)
-    /// - Allocation / protection / lock errors if the OS calls fail.
+    /// - Allocation / protection errors if the OS calls fail. A failed `mlock`
+    ///   is not an error; query [`is_locked`](Self::is_locked).
     pub fn new(len: usize) -> Result<Self, SiegelError> {
         let region = ProtectedRegion::new(len)?;
         Ok(Self {

@@ -4,6 +4,7 @@ description = "UniFFI bindings for Siegel. Enables sharing memory-protected secr
 readme = "README.md"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -16,24 +17,18 @@ crate-type = ["lib", "staticlib", "cdylib"]
 [features]
 # Exposes `sha256_consume` / `sha256_reseal` to the Swift / Kotlin integration
 # tests. Not for production use.
-test-utils = ["dep:sha2", "dep:libc", "siegel/test-utils"]
+test-utils = ["dep:sha2", "siegel/test-utils"]
 # additional intermediate logging useful for debugging and security information
-tracing = ["dep:tracing"]
+tracing = ["siegel/tracing"]
 
 [dependencies]
-siegel = { workspace = true }
+siegel = { workspace = true, features = ["session"] }
 thiserror = { workspace = true }
 uniffi = { workspace = true }
-getrandom = "0.4"
-libc = { version = "0.2", optional = true } # `libc` is only used by the `test_utils`
 sha2 = { version = "0.10", optional = true }
-tracing = { version = "0.1", optional = true, default-features = false }
-zeroize = "1"
 
 [dev-dependencies]
 sha2 = "0.10"
-# `test-utils` lets session tests inject a reseal failure.
-siegel = { workspace = true, features = ["test-utils"] }
 
 [lints]
 workspace = true
