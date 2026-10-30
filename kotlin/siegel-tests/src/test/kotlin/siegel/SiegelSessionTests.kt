@@ -15,17 +15,22 @@ import kotlin.test.assertTrue
 import uniffi.siegel_uniffi.SessionException
 import uniffi.siegel_uniffi.SiegelSession
 import uniffi.siegel_uniffi.sha256Consume
+import uniffi.siegel_uniffi.sha256Reseal
 
 /**
- * `siegel_fill` is a hand-written `extern "C"` symbol outside the UniFFI
- * scaffolding. JNA loads `libsiegel_uniffi` from `jna.library.path`
- * (configured in the test task) and calls the symbol directly.
+ * `siegel_fill` and `siegel_take` are hand-written `extern "C"` symbols
+ * outside the UniFFI scaffolding. JNA loads `libsiegel_uniffi` from
+ * `jna.library.path` (configured in the test task) and calls them directly.
  *
  * C ABI: `i32 siegel_fill(u64 handle, *const u8 src, usize len)`.
+ * C ABI: `i32 siegel_take(u64 handle, *mut u8 dst, usize len)`.
  */
 internal interface SiegelRawFFI : Library {
     @Suppress("FunctionName")
     fun siegel_fill(handle: Long, src: Pointer?, len: Long): Int
+
+    @Suppress("FunctionName")
+    fun siegel_take(handle: Long, dst: Pointer?, len: Long): Int
 }
 
 internal val RAW: SiegelRawFFI by lazy {
@@ -38,6 +43,14 @@ private const val FILL_ERR_INVALID_HANDLE: Int = -1
 private const val FILL_ERR_LEN_MISMATCH: Int = -2
 private const val FILL_ERR_NULL_SRC: Int = -3
 private const val FILL_ERR_WRONG_STATE: Int = -4
+private const val TAKE_OK: Int = 0
+private const val TAKE_ERR_INVALID_HANDLE: Int = -1
+private const val TAKE_ERR_LEN_MISMATCH: Int = -2
+private const val TAKE_ERR_NULL_DST: Int = -3
+private const val TAKE_ERR_WRONG_STATE: Int = -4
+
+/** Arbitrary non-secret bytes; rejected takes must leave the destination holding these. */
+private const val SENTINEL: Byte = 0xA5.toByte()
 
 /** Helper: copy `bytes` into native memory and call `siegel_fill`. */
 private fun fill(session: SiegelSession, bytes: ByteArray): Int {
@@ -45,6 +58,21 @@ private fun fill(session: SiegelSession, bytes: ByteArray): Int {
     mem.write(0, bytes, 0, bytes.size)
     return RAW.siegel_fill(session.handleId().toLong(), mem, bytes.size.toLong())
 }
+
+/**
+ * Helper: `siegel_take` into native memory, returning the code and a copy of the bytes for
+ * assertions. Like an app must, it zeroizes the native buffer once done, before freeing it.
+ */
+private fun take(session: SiegelSession, len: Int): Pair<Int, ByteArray> =
+    Memory(len.toLong()).use { mem ->
+        try {
+            mem.setMemory(0, len.toLong(), SENTINEL)
+            val rc = RAW.siegel_take(session.handleId().toLong(), mem, len.toLong())
+            rc to mem.getByteArray(0, len)
+        } finally {
+            mem.clear()
+        }
+    }
 
 private fun bytesOf(value: Byte, len: Int): ByteArray = ByteArray(len) { value }
 
@@ -183,5 +211,104 @@ class SiegelSessionTests {
             Thread.sleep(50)
         }
         assertEquals(FILL_ERR_INVALID_HANDLE, rc)
+    }
+
+    @Test
+    fun `reseal then take returns sha256`() {
+        val secret = bytesOf(0x42, 16)
+        val input = SiegelSession(16u)
+        assertEquals(FILL_OK, fill(input, secret))
+
+        val output = sha256Reseal(input)
+        assertTrue(input.isConsumed())
+        assertFalse(output.isConsumed())
+        assertEquals(32u, output.len())
+
+        val (rc, digest) = take(output, 32)
+        val expected = MessageDigest.getInstance("SHA-256").digest(secret)
+
+        assertEquals(TAKE_OK, rc)
+        assertContentEquals(expected, digest)
+        assertTrue(output.isConsumed())
+    }
+
+    @Test
+    fun `written session can be passed back into rust`() {
+        val input = SiegelSession(16u)
+        assertEquals(FILL_OK, fill(input, bytesOf(0x42, 16)))
+        val output = sha256Reseal(input)
+
+        val digest = sha256Consume(output)
+        val expected = MessageDigest.getInstance("SHA-256")
+            .digest(MessageDigest.getInstance("SHA-256").digest(bytesOf(0x42, 16)))
+
+        assertContentEquals(expected, digest)
+        assertEquals(TAKE_ERR_WRONG_STATE, take(output, 32).first)
+    }
+
+    @Test
+    fun `take rejects null dst`() {
+        val input = SiegelSession(8u)
+        assertEquals(FILL_OK, fill(input, bytesOf(1, 8)))
+        val output = sha256Reseal(input)
+        val rc = RAW.siegel_take(output.handleId().toLong(), null, 32L)
+        assertEquals(TAKE_ERR_NULL_DST, rc)
+        assertFalse(output.isConsumed())
+    }
+
+    @Test
+    fun `take rejects unknown handle`() {
+        val mem = Memory(4L)
+        val rc = RAW.siegel_take(0xDEADL, mem, 4L)
+        assertEquals(TAKE_ERR_INVALID_HANDLE, rc)
+    }
+
+    @Test
+    fun `take rejects length mismatch and recovers`() {
+        val input = SiegelSession(8u)
+        assertEquals(FILL_OK, fill(input, bytesOf(2, 8)))
+        val output = sha256Reseal(input)
+        assertEquals(TAKE_ERR_LEN_MISMATCH, take(output, 16).first)
+        // Session is still takeable with a correctly sized buffer.
+        assertEquals(TAKE_OK, take(output, 32).first)
+    }
+
+    @Test
+    fun `take rejects a session filled from native`() {
+        val session = SiegelSession(8u)
+        assertEquals(FILL_OK, fill(session, bytesOf(6, 8)))
+
+        val (rc, bytes) = take(session, 8)
+        assertEquals(TAKE_ERR_WRONG_STATE, rc)
+        assertContentEquals(bytesOf(SENTINEL, 8), bytes)
+        // The filled secret is still there for Rust to consume.
+        val expected = MessageDigest.getInstance("SHA-256").digest(bytesOf(6, 8))
+        assertContentEquals(expected, sha256Consume(session))
+    }
+
+    @Test
+    fun `take before write is rejected`() {
+        val session = SiegelSession(8u)
+        assertEquals(TAKE_ERR_WRONG_STATE, take(session, 8).first)
+        assertFalse(session.isConsumed())
+    }
+
+    @Test
+    fun `second take is rejected`() {
+        val input = SiegelSession(8u)
+        assertEquals(FILL_OK, fill(input, bytesOf(3, 8)))
+        val output = sha256Reseal(input)
+        assertEquals(TAKE_OK, take(output, 32).first)
+
+        val (rc, bytes) = take(output, 32)
+        assertEquals(TAKE_ERR_WRONG_STATE, rc)
+        assertContentEquals(bytesOf(SENTINEL, 32), bytes)
+    }
+
+    @Test
+    fun `reseal rejects empty input`() {
+        val input = SiegelSession(8u)
+        assertFailsWith<SessionException.InvalidState> { sha256Reseal(input) }
+        assertFalse(input.isConsumed())
     }
 }

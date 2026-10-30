@@ -1,7 +1,9 @@
 //! Helpers for integration tests.
 
 use std::io;
+use std::sync::Arc;
 
+use sha2::digest::generic_array::GenericArray;
 use sha2::{Digest, Sha256};
 
 use crate::session::{SessionError, SiegelSession, lookup_session};
@@ -23,6 +25,24 @@ pub fn sha256_consume(session: &SiegelSession) -> Result<Vec<u8>, SessionError> 
         h.update(bytes);
         h.finalize().to_vec()
     })
+}
+
+/// Consume the session and return a new one holding SHA-256 of its bytes,
+/// for `siegel_take`.
+///
+/// # Warning
+/// Only for integration tests.
+///
+/// # Errors
+/// Same as [`SiegelSession::read_once`] and [`SiegelSession::new_written`].
+#[uniffi::export]
+pub fn sha256_reseal(input: &SiegelSession) -> Result<Arc<SiegelSession>, SessionError> {
+    SiegelSession::new_written(32, |buf| {
+        input.read_once(|bytes| {
+            // Finalize into protected memory, not a returned temporary.
+            Sha256::new_with_prefix(bytes).finalize_into(GenericArray::from_mut_slice(buf));
+        })
+    })?
 }
 
 /// Sentinel return values for the segfault helpers.
