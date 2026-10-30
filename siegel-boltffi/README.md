@@ -63,7 +63,7 @@ val key = takeSession(output) { buffer -> deriveKey(buffer) }
 
 Unless you know what you're doing, always use `withSession { }` or `SiegelSession(...).use { }`. The generated `SiegelSession` is `AutoCloseable` but registers no `Cleaner`, unlike `siegel-uniffi`'s, so an unclosed session is never freed.
 
-`obliviate()` and consuming a session free its protected memory and its slot under the process-wide cap of 1024 sessions holding secrets, but not the session object: only `close()` does that, and leaked sessions are refused once 16384 are open. Calling a closed session throws `IllegalStateException`.
+`obliviate()` and consuming a session free its protected memory and its slot under the process-wide cap of 1024 sessions holding secrets, but not the session object: only `close()` does that, and once 16384 sessions are open, new ones are refused. Calling a closed session throws `IllegalStateException`.
 
 Confine a session to one thread: closing it while another thread is inside one of its methods is a use-after-free.
 

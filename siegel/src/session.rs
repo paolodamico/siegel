@@ -40,9 +40,9 @@ static HELD: AtomicUsize = AtomicUsize::new(0);
 pub const MAX_ACTIVE_SESSIONS: usize = 1024;
 
 /// Max sessions alive at once, consumed or not. A consumed session holds no
-/// protected memory, but one foreign code never releases still costs a
-/// registry entry that every [`SessionCore::new`] scans under the lock, so
-/// unbounded leaks are refused rather than slowing every caller down.
+/// protected memory, but one foreign code never releases still holds its
+/// registry entry and binding object; past this bound a leak becomes a loud
+/// refusal instead of unbounded growth.
 pub const MAX_OPEN_SESSIONS: usize = 16 * MAX_ACTIVE_SESSIONS;
 
 /// Maximum tries to get a non-collision handle. Extremely unlikely to ever occur.
@@ -133,8 +133,9 @@ impl SessionCore {
 
         // Hold the lock to the registry while allocation occurs to prevent
         // race conditions that could exceed the maximum active sessions.
+        // Dropped sessions remove their own entry (see `Drop`), so the registry
+        // holds exactly the live ones.
         let mut registry = registry_lock();
-        registry.retain(|_, w| w.strong_count() > 0); // Prune dropped entries
         let held = HELD.load(Ordering::Relaxed);
         if held >= MAX_ACTIVE_SESSIONS || registry.len() >= MAX_OPEN_SESSIONS {
             // Checked before allocation to avoid wasting resources
@@ -385,15 +386,8 @@ impl SessionCore {
 
 impl Drop for SessionCore {
     fn drop(&mut self) {
-        // Only evict our own entry: if a concurrent prune already removed it,
-        // the id may since have been issued to a live session.
-        let mut registry = registry_lock();
-        if registry
-            .get(&self.handle_id)
-            .is_some_and(|w| std::ptr::eq(w.as_ptr(), self))
-        {
-            registry.remove(&self.handle_id);
-        }
+        // The entry's id can't have been reissued: ids are only freed here.
+        registry_lock().remove(&self.handle_id);
     }
 }
 
@@ -749,11 +743,10 @@ mod tests {
         assert_eq!(rc, FILL_ERR_INVALID_HANDLE);
     }
 
-    /// Sessions dropped on the foreign side should not pin the registry
-    /// forever. The opportunistic prune in `new` makes capacity available
-    /// again for subsequent allocations.
+    /// Sessions dropped on the foreign side must not pin the registry: the
+    /// handle stops resolving once the session is gone.
     #[test]
-    fn registry_prunes_dropped_sessions() {
+    fn dropped_sessions_leave_the_registry() {
         let handle = {
             let s = SessionCore::new(8).unwrap();
             s.handle_id()

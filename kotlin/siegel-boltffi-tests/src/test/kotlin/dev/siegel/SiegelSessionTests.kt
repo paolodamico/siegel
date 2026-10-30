@@ -425,9 +425,9 @@ class SiegelSessionTests {
     }
 
     @Test
-    fun `wipe leaves a read-only view alone`() {
+    fun `wipe refuses a read-only view rather than silently skipping it`() {
         val buffer = ByteBuffer.allocateDirect(8).put(bytesOf(0x7F, 8))
-        buffer.asReadOnlyBuffer().wipe() // must not throw from a `finally`
+        assertFailsWith<IllegalArgumentException> { buffer.asReadOnlyBuffer().wipe() }
         buffer.wipe()
         assertContentEquals(ByteArray(8), ByteArray(8).also { buffer.duplicate().clear().get(it) })
     }

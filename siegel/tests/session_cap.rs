@@ -63,7 +63,7 @@ fn cap_is_enforced_at_exactly_max_active_sessions() {
     let mut sessions = fill_up();
     assert_eq!(sessions.len(), MAX_ACTIVE_SESSIONS);
 
-    // Dropping releases the Arcs; the next `new` prunes the dead entries.
+    // Dropping releases the Arcs, and each session removes its own entry.
     sessions.clear();
     assert!(
         SessionCore::new(1).is_ok(),
@@ -120,6 +120,11 @@ fn failed_seals_free_their_slot() {
         unsafe { siegel::session::take_into(taken.handle_id(), out.as_mut_ptr(), 1) },
         TAKE_OK
     );
+    assert_free_slots(2);
+
+    // `new_written` takes a free slot, then fails sealing and gives it back.
+    siegel::test_utils::fail_next_reseal();
+    assert!(SessionCore::new_written(1, |_| Ok::<_, Infallible>(())).is_err());
     assert_free_slots(2);
 }
 

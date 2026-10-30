@@ -94,15 +94,17 @@ private fun takeFailure(code: Int): SiegelNativeException {
 }
 
 /**
- * Overwrite a buffer's contents with zeros. Never throws, so it is safe in a
- * `finally`.
+ * Overwrite a buffer's contents with zeros. Never throws on a writable buffer,
+ * so it is safe in a `finally` over one.
  *
  * Only fully effective on a direct buffer: on a heap-backed buffer this wipes the
- * one copy you can reach and leaves any GC-relocated duplicates intact. A
- * read-only view is left as is; wipe the buffer it views (as [takeSession] does).
+ * one copy you can reach and leaves any GC-relocated duplicates intact.
+ *
+ * @throws IllegalArgumentException on a read-only view, which can't be wiped:
+ *   wipe the buffer it views. [takeSession] already does so for its view.
  */
 public fun ByteBuffer.wipe() {
-    if (isReadOnly) return
+    require(!isReadOnly) { "can't wipe a read-only view; wipe the buffer it views" }
     // Overwrite in place: allocating here could fail under memory pressure and
     // leave the secret resident.
     val view = duplicate().apply { clear() }
