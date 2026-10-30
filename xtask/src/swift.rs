@@ -538,7 +538,8 @@ mod tests {
     #[test]
     fn symbol_check_fails_without_static_libraries() {
         let framework = create_temp_dir("xtask-empty-xcframework").unwrap();
-        assert!(ensure_no_test_symbols(&framework).is_err());
+        let error = ensure_no_test_symbols(&framework).unwrap_err().to_string();
+        assert!(error.contains("no static libraries"), "{error}");
         remove_dir(&framework).unwrap();
     }
 
