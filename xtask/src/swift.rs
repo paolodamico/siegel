@@ -529,7 +529,18 @@ fn duration(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Outcome, is_failure_detail, parse_results, simulator_udid};
+    use super::{
+        Outcome, ensure_no_test_symbols, is_failure_detail, parse_results, simulator_udid,
+    };
+    use crate::common::{create_temp_dir, remove_dir};
+
+    /// A framework with nothing to inspect must not pass as free of test symbols.
+    #[test]
+    fn symbol_check_fails_without_static_libraries() {
+        let framework = create_temp_dir("xtask-empty-xcframework").unwrap();
+        assert!(ensure_no_test_symbols(&framework).is_err());
+        remove_dir(&framework).unwrap();
+    }
 
     #[test]
     fn reads_the_udid_from_a_simctl_line() {
