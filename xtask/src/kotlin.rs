@@ -46,6 +46,7 @@ fn build_uniffi() -> Result<()> {
     println!("Building host cdylib (siegel-uniffi, features: {UNIFFI_FEATURES})...");
     run(Command::new("cargo").current_dir(&root).args([
         "build",
+        "--locked",
         "--package",
         "siegel-uniffi",
         "--features",
@@ -79,8 +80,8 @@ fn build_boltffi(test_utils: bool) -> Result<()> {
     let crate_dir = boltffi::crate_dir();
     let libs = kotlin.join("boltffi-libs");
     let test_sources = kotlin.join("siegel-boltffi-tests/src/main/kotlin/generated");
-    // Test-only helpers are off by default. They export `sha256_consume` and
-    // `unsafe_test_only_siegel_front_guard_bolt`.
+    // Test-only helpers are off by default. They export `sha256_consume`,
+    // `sha256_reseal` and `unsafe_test_only_siegel_front_guard_bolt`.
     let features = if test_utils { "jvm,test-utils" } else { "jvm" };
 
     boltffi::ensure_cli()?;
@@ -89,12 +90,17 @@ fn build_boltffi(test_utils: bool) -> Result<()> {
 
     reset_dir(&libs)?;
     reset_dir(&test_sources)?;
+    // `boltffi generate` writes here and step 2 copies from it, so a stale tree
+    // would leak removed files into the test sources.
+    let packed = crate_dir.join("dist/android/kotlin");
+    remove_dir(&crate_dir.join("dist/android"))?;
 
     println!("Step 1: building host cdylib (siegel-boltffi, features: {features})");
     run(Command::new("cargo")
         .current_dir(&root)
         .args([
             "build",
+            "--locked",
             "--package",
             "siegel-boltffi",
             "--features",
@@ -105,10 +111,15 @@ fn build_boltffi(test_utils: bool) -> Result<()> {
 
     let rust_lib = root.join(format!("target/release/libsiegel_boltffi.{lib_ext}"));
     ensure_file(&rust_lib, "cdylib")?;
-    copy_file(
-        &rust_lib,
-        &libs.join(rust_lib.file_name().expect("the library path names a file")),
-    )?;
+    let copied = libs.join(rust_lib.file_name().expect("the library path names a file"));
+    copy_file(&rust_lib, &copied)?;
+    if cfg!(target_os = "macos") {
+        // rustc stamps an absolute LC_ID_DYLIB under target/; the JNI glue linked
+        // below would record that path, which the @loader_path rpath can't redirect.
+        run(Command::new("install_name_tool")
+            .args(["-id", "@rpath/libsiegel_boltffi.dylib"])
+            .arg(&copied))?;
+    }
     println!("  -> {}", rust_lib.display());
 
     println!("Step 2: generating Kotlin bindings + JNI glue");
@@ -120,13 +131,14 @@ fn build_boltffi(test_utils: bool) -> Result<()> {
             "generate",
             "kotlin",
             "--cargo-arg",
+            "--locked",
+            "--cargo-arg",
             "--features",
             "--cargo-arg",
             features,
         ])
         .envs(binding_expansion_env(&crate_dir, features)))?;
 
-    let packed = crate_dir.join("dist/android/kotlin");
     let glue = packed.join("jni/jni_glue.c");
     ensure_file(&glue, "generated JNI glue")?;
     copy_dir_all(&packed.join("dev"), &test_sources.join("dev"))?;
@@ -238,6 +250,8 @@ pub fn android(extra_args: &[String]) -> Result<()> {
             "android",
             "--release",
             "--cargo-arg",
+            "--locked",
+            "--cargo-arg",
             "--features",
             "--cargo-arg",
             "jvm",
@@ -248,8 +262,9 @@ pub fn android(extra_args: &[String]) -> Result<()> {
     // Locate the generated bindings rather than assuming the configured output
     // path, so this keeps working if `boltffi.toml`'s layout changes.
     let generated = find_files(&dist, &|path| {
+        // Component-wise, so it also matches `dev\siegel` on Windows.
         path.file_name() == Some(OsStr::new("Siegel.kt"))
-            && path.to_string_lossy().contains("dev/siegel/")
+            && path.parent().is_some_and(|dir| dir.ends_with("dev/siegel"))
     })?
     .into_iter()
     .next()
@@ -342,7 +357,7 @@ pub fn test(binding: Binding) -> Result<()> {
     println!("Step 1: building host cdylib + Kotlin bindings ({binding})");
     match binding {
         Binding::Uniffi => build_uniffi()?,
-        // The suite drives `sha256_consume` and the guard helpers end to end.
+        // The suite drives the SHA-256 helpers and the guard probe end to end.
         Binding::Boltffi => build_boltffi(true)?,
     }
 

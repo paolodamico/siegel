@@ -6,7 +6,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
-use crate::common::{capture, create_temp_dir, find_by_extension, has_command, remove_dir, run};
+use crate::common::{capture, create_temp_dir, find_by_extension, find_on_path, remove_dir, run};
 use crate::report::{Outcome, TestCase};
 
 /// Gradle version bootstrapped when the checkout has no wrapper. Pinned to an
@@ -74,8 +74,7 @@ fn macos_java_home() -> Option<PathBuf> {
 /// is deliberately not used on macOS, where `/usr/bin/java` is a shim that would
 /// resolve to a useless `/usr`.
 fn java_home_from_path() -> Option<PathBuf> {
-    let java = capture(Command::new("which").arg("java")).ok()?;
-    let java = std::fs::canonicalize(java.trim()).ok()?;
+    let java = std::fs::canonicalize(find_on_path("java")?).ok()?;
     let home = java.parent()?.parent()?.to_path_buf();
     home.join("bin/java").is_file().then_some(home)
 }
@@ -156,7 +155,7 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
 /// Unpack `zip` into `dest`, falling back to the JDK's `jar` when `unzip` is absent.
 fn extract_zip(zip: &Path, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
-    if has_command("unzip") {
+    if find_on_path("unzip").is_some() {
         return run(Command::new("unzip").arg("-q").arg(zip).arg("-d").arg(dest));
     }
     run(Command::new("jar").current_dir(dest).arg("xf").arg(zip))

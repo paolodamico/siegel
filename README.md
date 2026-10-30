@@ -23,12 +23,12 @@ Siegel particularly focuses on secrets that must cross foreign boundaries. For e
 
 ## Foreign bindings
 
-Two binding crates wrap the same `siegel::session` core:
+Two binding crates wrap the same `siegel::session` core. Use `siegel-uniffi` unless you are evaluating BoltFFI; both emit a Swift module named `Siegel`, so pick one per app.
 
-| crate | generator |
-|-------|-----------|
-| [`siegel-boltffi`](siegel-boltffi/README.md) | [BoltFFI](https://boltffi.dev) |
-| [`siegel-uniffi`](siegel-uniffi/README.md) | [UniFFI](https://mozilla.github.io/uniffi-rs/) |
+| crate | generator | status |
+|-------|-----------|--------|
+| [`siegel-uniffi`](siegel-uniffi/README.md) | [UniFFI](https://mozilla.github.io/uniffi-rs/) | default |
+| [`siegel-boltffi`](siegel-boltffi/README.md) | [BoltFFI](https://boltffi.dev) | experimental |
 
 Building foreign bindings or running foreign tests can be done through the `xtask` crate.
 

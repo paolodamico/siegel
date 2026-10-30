@@ -34,12 +34,20 @@ jobs:
         with:
           toolchain: stable
           components: clippy,rustfmt
+          targets: aarch64-linux-android,aarch64-apple-ios
 
       - name: Check code formatting
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+
+      # The binding legs only build host libraries; this is the only place the
+      # shipping targets (and the Android `jvm` requirement) are compiled.
+      - name: Check mobile targets
+        run: |
+          cargo check --locked -p siegel-boltffi --features jvm --target aarch64-linux-android
+          cargo check --locked -p siegel-boltffi -p siegel-uniffi --target aarch64-apple-ios
 
       # The CLI used here MUST match the boltffi version in the repo
       - name: Assert a single boltffi version resolves
@@ -61,10 +69,21 @@ jobs:
 
     strategy:
       matrix:
-        rust:
-          - stable
-          - nightly
-          - 1.85.0 # MSRV
+        include:
+          - rust: stable
+            packages: --workspace
+          - rust: nightly
+            packages: --workspace
+          # MSRVs. `boltffi` itself needs 1.88 (let chains); the rest build on 1.85.
+          - rust: 1.85.0
+            packages: -p siegel -p siegel-uniffi
+          - rust: 1.88.0
+            packages: -p siegel-boltffi
+
+    # `rust-toolchain.toml` pins stable and outranks the `rustup default` the
+    # toolchain action sets, so without this every leg would run stable.
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
 
     steps:
       - name: Checkout code
@@ -79,11 +98,11 @@ jobs:
 
       - name: Run tests
         run: |
-          cargo test --workspace --all-features
+          cargo test --locked ${{ matrix.packages }} --all-features
 
       - name: Build with default features
         run: |
-          cargo build --workspace
+          cargo build --locked ${{ matrix.packages }}
 
   bindings:
     name: ${{ matrix.name }}
@@ -163,8 +182,6 @@ jobs:
         checks:
           - advisories
           - bans licenses sources
-
-    continue-on-error: ${{ matrix.checks == 'advisories' }}
 
     steps:
       - name: Checkout code

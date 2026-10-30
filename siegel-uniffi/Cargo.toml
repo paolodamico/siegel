@@ -4,6 +4,7 @@ description = "UniFFI bindings for Siegel. Enables sharing memory-protected secr
 readme = "README.md"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -14,8 +15,8 @@ name = "siegel_uniffi"
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [features]
-# Exposes `sha256_consume` to foreign bindings. Used by the Swift / Kotlin
-# integration test suites to drive `read_once` end-to-end. Not for production use.
+# Exposes `sha256_consume` / `sha256_reseal` to the Swift / Kotlin integration
+# tests. Not for production use.
 test-utils = ["dep:sha2", "siegel/test-utils"]
 # additional intermediate logging useful for debugging and security information
 tracing = ["siegel/tracing"]

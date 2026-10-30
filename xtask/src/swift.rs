@@ -185,6 +185,7 @@ fn cargo_ios_build(root: &Path, target: &str) -> Result<()> {
         .current_dir(root)
         .args([
             "build",
+            "--locked",
             "--package",
             "siegel-uniffi",
             "--features",
@@ -235,10 +236,10 @@ fn build_boltffi(sim_only: bool, test_utils: bool) -> Result<()> {
     let mut command = Command::new("boltffi");
     command
         .current_dir(&crate_dir)
-        .args(["pack", "apple", "--release"]);
+        .args(["pack", "apple", "--release", "--cargo-arg", "--locked"]);
     if test_utils {
-        // Test-only helpers are off by default. They export `sha256_consume`
-        // and `unsafe_test_only_siegel_front_guard_bolt`.
+        // Test-only helpers are off by default. They export `sha256_consume`,
+        // `sha256_reseal` and `unsafe_test_only_siegel_front_guard_bolt`.
         command.args(["--cargo-arg", "--features", "--cargo-arg", "test-utils"]);
     }
     if sim_only {
@@ -258,9 +259,27 @@ fn build_boltffi(sim_only: bool, test_utils: bool) -> Result<()> {
         );
     }
 
+    if !test_utils {
+        ensure_no_test_symbols(&framework)?;
+    }
+
     println!();
     println!("Apple artifacts in {}:", dist.display());
     println!("{}", dir_listing(&dist, 1));
+    Ok(())
+}
+
+/// Fail if a release XCFramework exports the `test-utils` hooks.
+fn ensure_no_test_symbols(framework: &Path) -> Result<()> {
+    for lib in find_by_extension(framework, "a")? {
+        let symbols = capture(Command::new("nm").arg("-gU").arg(&lib))?;
+        if symbols.contains("unsafe_test_only_") {
+            bail!(
+                "{} exports unsafe_test_only_* symbols; is test-utils enabled?",
+                lib.display()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -290,7 +309,7 @@ pub fn test(binding: Binding) -> Result<()> {
     println!("Step 1: building Swift bindings ({binding}, sim-only)");
     match binding {
         Binding::Uniffi => build_uniffi(true)?,
-        // The suite drives `sha256_consume` and the guard helpers end to end.
+        // The suite drives the SHA-256 helpers and the guard probe end to end.
         Binding::Boltffi => build_boltffi(true, true)?,
     }
     if !framework.is_dir() {

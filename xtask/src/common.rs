@@ -14,21 +14,25 @@ use anyhow::{Context, Result, bail};
 pub const UNIFFI_FEATURES: &str = "test-utils";
 
 /// Absolute path to the workspace root.
+///
+/// Prefers the `CARGO_MANIFEST_DIR` that `cargo run` (and so `cargo xtask`) sets
+/// at runtime: the compile-time value goes stale when cargo reuses this binary
+/// after the checkout was moved or copied.
 pub fn project_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")), PathBuf::from)
         .parent()
         .expect("xtask Cargo.toml lives one directory below the workspace root")
         .to_path_buf()
 }
 
-/// Fail unless the workspace root baked in at compile time still looks like this
-/// checkout
+/// Fail unless the resolved workspace root looks like a checkout of this repo.
 pub fn verify_project_root() -> Result<()> {
     let root = project_root();
     if !root.join("Cargo.toml").is_file() {
         bail!(
-            "workspace root {} has no Cargo.toml — this xtask binary was built for a \
-             different checkout; run `cargo clean -p xtask` and retry",
+            "workspace root {} has no Cargo.toml — run this through `cargo xtask` from \
+             the checkout",
             root.display()
         );
     }
@@ -57,14 +61,29 @@ pub fn in_ci() -> bool {
         || std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
 }
 
-/// Whether `name` resolves to an executable on `PATH`.
-pub fn has_command(name: &str) -> bool {
-    Command::new("which")
-        .arg(name)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+/// Resolve `name` to an executable on `PATH`, as the shell's `command -v` would,
+/// without depending on a `which` binary.
+pub fn find_on_path(name: &str) -> Option<PathBuf> {
+    find_in(&std::env::var_os("PATH")?, name)
+}
+
+fn find_in(search_path: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
+    std::env::split_paths(search_path)
+        .map(|dir| dir.join(name))
+        .find(|path| is_executable(path))
+}
+
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        path.metadata()
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 /// Run `cmd` to completion; return an error if it exits non-zero.
@@ -330,7 +349,7 @@ fn list_entries(dir: &Path, max_depth: usize) -> Result<Vec<PathBuf>> {
 pub fn uniffi_generate(root: &Path, library: &Path, language: &str, out_dir: &Path) -> Result<()> {
     run(Command::new("cargo")
         .current_dir(root)
-        .args(["run", "-p", "uniffi-bindgen", "--", "generate"])
+        .args(["run", "--locked", "-p", "uniffi-bindgen", "--", "generate"])
         .arg(library)
         .args([
             "--library",
@@ -344,7 +363,29 @@ pub fn uniffi_generate(root: &Path, library: &Path, language: &str, out_dir: &Pa
 
 #[cfg(test)]
 mod tests {
-    use super::list_entries;
+    use super::{find_in, list_entries};
+
+    #[cfg(unix)]
+    #[test]
+    fn finds_the_first_executable_on_the_search_path() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = std::env::temp_dir().join("xtask_common_find_in");
+        let _ = std::fs::remove_dir_all(&root);
+        let (plain, exec) = (root.join("plain"), root.join("exec"));
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::create_dir_all(&exec).unwrap();
+        // A non-executable match earlier on the path must be skipped.
+        std::fs::write(plain.join("java"), "").unwrap();
+        std::fs::write(exec.join("java"), "").unwrap();
+        std::fs::set_permissions(exec.join("java"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+
+        let search_path = std::env::join_paths([&plain, &exec]).unwrap();
+        assert_eq!(find_in(&search_path, "java"), Some(exec.join("java")));
+        assert_eq!(find_in(&search_path, "javac"), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn lists_entries_depth_first_and_honours_max_depth() {

@@ -30,7 +30,7 @@ The design focuses on making it harder to do unsafe behavior. For example, it ta
 - ✅ Bugs within the process where memory where the secret is stored is accidentally read.
 - ✅ Stale pointer dereferences the sealed secret (`PROT_NONE` segfaults)
 - ✔️ Secret swapped to disk (best effort; already not applicable on iOS).
-- ✅ `UniFFI` copies the secret into additional buffers for lowering/lifting which results in unzeroized copies of the secret.
+- ✅ `UniFFI` / `BoltFFI` copy the secret into additional buffers for lowering/lifting which results in unzeroized copies of the secret.
 - ✅ Closure panics mid-operation. Secret is still zeroized as long as there is panic unwinding.
 - ✅ Makes accidental logging of secrets hard. Secret is only accessible within an explicit closure.
 
@@ -41,9 +41,15 @@ The design focuses on making it harder to do unsafe behavior. For example, it ta
 - 🔴 Memory hardware attacks.
 - 🔴 The brief window during the read and write inside closures. This window cannot be reduced.
 - 🔴 Mistakes by consumers of this package. Particularly, callers could accidentally log the secret, copy it elsewhere, etc.
-- 🔴 Panics where the process aborts without triggering `Drop`s. The secret may live in memory until the OS clears it.
+- 🔴 Panics where the process aborts without triggering `Drop`s. The secret may live in memory until the OS clears it. The release profile of this workspace sets `panic = "abort"`.
+- 🔴 The foreign side's own copy. The buffer foreign code fills from (or takes into) is ordinary memory: not `mlock`ed, not sealed, included in core dumps, until the caller wipes it.
 
 
+## Features
+
+- `session`: the handle-based [`session`](https://docs.rs/siegel/latest/siegel/session/) layer the binding crates build on: a process-wide registry of up to 1024 live sessions and the raw `fill_into` / `take_into` entry points. Not needed by pure-Rust callers.
+- `tracing`: warns on `mlock` failure, rejected raw calls and memory failures, under the `siegel` target.
+- `test-utils`: test-only hooks (guard-page probes, injected reseal failures) shared with the binding crates' suites. Never ship it.
 
 ## Example
 

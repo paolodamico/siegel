@@ -1,4 +1,4 @@
-# Kotlin/JVM bindings for `siegel-uniffi`
+# Kotlin/JVM integration tests
 
 Integration tests for the Kotlin bindings. Tests run on the JVM (not on an Android device or emulator) against the **host** `cdylib`.
 
@@ -23,8 +23,8 @@ Set `VERBOSE=1` to stream the full Gradle log instead of the filtered one.
 
 | module | crate | mechanism |
 |--------|-------|-----------|
-| `siegel-tests/` | `siegel-uniffi` | JNA, raw `siegel_fill` |
-| `siegel-boltffi-tests/` | `siegel-boltffi` | JNI, direct `ByteBuffer` via `SiegelNative.fillDirect` |
+| `siegel-tests/` | `siegel-uniffi` | JNA, raw `siegel_fill` / `siegel_take` |
+| `siegel-boltffi-tests/` | `siegel-boltffi` | JNI, direct `ByteBuffer` via `SiegelNative.fillDirect` / `takeDirect` |
 
 `cargo xtask kotlin android` produces the Android distribution; see
 [`siegel-boltffi/README.md`](../siegel-boltffi/README.md).

@@ -1,4 +1,4 @@
-# Swift bindings for `siegel-uniffi`
+# Swift integration tests
 
 Contains integration tests for foreign Swift bindings of `Siegel` and Swift package builds.
 

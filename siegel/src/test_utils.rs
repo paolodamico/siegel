@@ -1,7 +1,22 @@
+use std::cell::Cell;
 use std::io;
 
 use crate::ProtectedRegion;
 use crate::Siegel;
+
+thread_local! {
+    static FAIL_NEXT_RESEAL: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Test-only: make the next reseal to `PROT_NONE` on this thread fail with
+/// `ENOMEM`, to exercise error paths that run after a secret was unsealed.
+pub fn fail_next_reseal() {
+    FAIL_NEXT_RESEAL.set(true);
+}
+
+pub(crate) fn take_reseal_failure() -> bool {
+    FAIL_NEXT_RESEAL.replace(false)
+}
 
 impl ProtectedRegion {
     /// Test-only: read one byte from the front guard page. The guard
@@ -40,6 +55,8 @@ pub const ERR_INVALID_HANDLE: i32 = -1;
 pub const ERR_FORK_FAILED: i32 = -2;
 pub const ERR_WAITPID_FAILED: i32 = -3;
 pub const ERR_NOT_SIGNALED: i32 = -4;
+/// The child wedged and the `SIGALRM` watchdog killed it.
+pub const ERR_CHILD_TIMEOUT: i32 = -5;
 
 /// Wall-clock bound on the forked child. It is expected to fault within
 /// microseconds; anything longer means it wedged.
@@ -51,7 +68,8 @@ const CHILD_TIMEOUT_SECS: libc::c_uint = 5;
 /// touch process state.
 ///
 /// Returns one of [`ERR_FORK_FAILED`], [`ERR_WAITPID_FAILED`],
-/// [`ERR_NOT_SIGNALED`], or the positive signal number on success.
+/// [`ERR_NOT_SIGNALED`], [`ERR_CHILD_TIMEOUT`], or the positive signal number
+/// on success.
 pub fn fork_and_run(work: impl FnOnce()) -> i32 {
     // SAFETY: fork is safe; the child only calls async-signal-safe APIs
     // (setrlimit, _exit) plus the caller's `work`. The caller is responsible
@@ -65,11 +83,13 @@ pub fn fork_and_run(work: impl FnOnce()) -> i32 {
         // Child: reset SIGSEGV/SIGBUS to the kernel default so test runners
         // that install their own handlers (HotSpot on the JVM, XCTest on
         // Darwin, etc.) don't intercept the fault and abort the child with
-        // a different signal (e.g. `SIGABRT` on JVM).
+        // a different signal (e.g. `SIGABRT` on JVM). `SIGALRM` too, or a host
+        // that ignores it would defeat the watchdog below.
         // SAFETY: signal() is async-signal-safe.
         unsafe {
             libc::signal(libc::SIGSEGV, libc::SIG_DFL);
             libc::signal(libc::SIGBUS, libc::SIG_DFL);
+            libc::signal(libc::SIGALRM, libc::SIG_DFL);
         }
 
         // Suppress core dumps to keep CrashReporter quiet, then run the
@@ -108,11 +128,11 @@ pub fn fork_and_run(work: impl FnOnce()) -> i32 {
         }
     }
 
-    // Darwin / Linux wait-status: low 7 bits hold the terminating signal
-    // when the process was killed; 0x7F is the stopped sentinel.
-    let low = status & 0x7F;
-    if low == 0 || low == 0x7F {
+    if !libc::WIFSIGNALED(status) {
         return ERR_NOT_SIGNALED;
     }
-    low
+    match libc::WTERMSIG(status) {
+        libc::SIGALRM => ERR_CHILD_TIMEOUT,
+        signal => signal,
+    }
 }

@@ -49,11 +49,12 @@ pub fn ensure_cli() -> Result<()> {
 fn resolved_version() -> Result<String> {
     let root = project_root();
     // `cargo pkgid` needs a resolved dependency graph.
-    capture(
-        Command::new("cargo")
-            .current_dir(&root)
-            .args(["metadata", "--format-version", "1"]),
-    )
+    capture(Command::new("cargo").current_dir(&root).args([
+        "metadata",
+        "--format-version",
+        "1",
+        "--locked",
+    ]))
     .context("`cargo metadata` failed, so the boltffi version could not be resolved")?;
 
     let pkgid = capture(

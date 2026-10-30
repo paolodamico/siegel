@@ -2,7 +2,10 @@
 //! to use [`crate::Siegel`]. This module is binding-framework agnostic.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, Weak};
+
+use zeroize::Zeroize;
 
 use crate::{Empty, Loaded, Siegel, SiegelError};
 
@@ -16,14 +19,22 @@ type Registry = Mutex<HashMap<u64, Weak<SessionCore>>>;
 /// Global registry of handles. Each [`SessionCore`] is initialized in this registry
 /// so that Rust can enforce ownership of handles.
 ///
-/// Siegels are filled with raw pointers on the foreign side (see [`fill_into`]),
-/// and without the registry, foreign code could pass garbage or deallocated pointers. More
-/// commonly it avoids accidental use after drop.
+/// Siegels are filled and taken with raw pointers on the foreign side (see [`fill_into`]
+/// and [`take_into`]), and without the registry, foreign code could pass garbage or
+/// deallocated pointers. More commonly it avoids accidental use after drop.
 static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Max concurrent live sessions. Bounds mlocked memory on platforms where
-/// `RLIMIT_MEMLOCK` is enforced (typically Linux server / containers).
-/// Pruned opportunistically on every `SessionCore::new`.
+/// Sessions still holding protected memory. The cap counts these rather than
+/// registry entries, so a consumed session that foreign code never released
+/// does not use up a slot.
+static HELD: AtomicUsize = AtomicUsize::new(0);
+
+/// Max sessions holding protected memory at once. Consumed sessions don't
+/// count, even while foreign code still holds them.
+///
+/// This bounds the number of regions, not bytes: at up to 1 MiB each, the cap
+/// exceeds a typical `RLIMIT_MEMLOCK`, past which sessions keep working but
+/// unlocked (see [`SessionCore::is_locked`]).
 ///
 /// The cap is per-process and shared by every consumer of this module: a
 /// process embedding a binding crate *and* calling [`SessionCore`] directly
@@ -33,18 +44,23 @@ pub const MAX_ACTIVE_SESSIONS: usize = 1024;
 /// Maximum tries to get a non-collision handle. Extremely unlikely to ever occur.
 const MAX_HANDLE_ALLOC_RETRIES: u8 = 8;
 
-/// One-time secret-handling session, held by foreign code as `Arc<SessionCore>`.
+/// One-time secret-handling session. Binding crates wrap it in their own
+/// exported type; foreign code never sees it directly.
 ///
 /// The session wraps an internal `Siegel<Empty>` or `Siegel<Loaded>`
 /// behind a `Mutex` so it can be driven through `&self` methods.
 /// [`fill_into`] writes bytes into the empty siegel and transitions
-/// the state to `Loaded`; [`read_once`](Self::read_once)
+/// the state to `Filled`; [`read_once`](Self::read_once)
 /// runs the application operation against the loaded siegel and wipes.
+/// In reverse, [`new_written`](Self::new_written) opens a `Written` session and
+/// [`take_into`] copies it out and wipes.
 pub struct SessionCore {
     state: Mutex<SessionState>,
     handle_id: u64,
     /// Bytes the session was allocated for. Stable for its lifetime.
     capacity: u32,
+    /// Whether this session still counts toward [`HELD`].
+    held: AtomicBool,
 }
 
 impl SessionCore {
@@ -57,39 +73,27 @@ impl SessionCore {
     /// # Errors
     ///
     /// `SessionError::InvalidLength` for `len == 0` or `len > 1 MiB`.
-    /// `SessionError::TooManyActiveSessions` if the registry is at the
-    /// `MAX_ACTIVE_SESSIONS` cap.
-    /// Allocation / protection / lock errors propagate from `siegel`.
+    /// `SessionError::TooManyActiveSessions` if [`MAX_ACTIVE_SESSIONS`] sessions
+    /// already hold protected memory.
+    /// Allocation / protection errors propagate from `siegel`. A failed `mlock`
+    /// does not fail the constructor; query [`is_locked`](Self::is_locked).
     pub fn new(len: u32) -> Result<Arc<Self>, SessionError> {
-        let len_usize = usize::try_from(len).map_err(|_| SessionError::InvalidLength)?;
-
-        // Hold the lock to the registry while allocation occurs to prevent
-        // race conditions that could exceed the maximum active sessions.
-        let mut registry = registry_lock();
-        registry.retain(|_, w| w.strong_count() > 0); // Prune dropped entries
-        if registry.len() >= MAX_ACTIVE_SESSIONS {
-            // Checked before allocation to avoid wasting resources
-            #[cfg(feature = "tracing")]
-            tracing::warn!(
-                target: "siegel",
-                active = registry.len(),
-                max = MAX_ACTIVE_SESSIONS,
-                "session cap reached; refusing to allocate (leaked sessions?)"
-            );
-            return Err(SessionError::TooManyActiveSessions);
-        }
-
-        let empty = Siegel::<Empty>::new(len_usize)?;
-
-        let handle_id = allocate_handle_id(&registry)?;
-        let session = Arc::new(Self {
-            state: Mutex::new(SessionState::Empty(empty)),
-            handle_id,
-            capacity: len,
-        });
-
-        registry.insert(handle_id, Arc::downgrade(&session));
-        drop(registry);
+        // Logged here, after `register` released the registry lock: a
+        // subscriber runs synchronously, and one that opens or drops a session
+        // would re-enter that non-reentrant lock.
+        let session = match Self::register(len) {
+            Ok(session) => session,
+            Err(e) => {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    target: "siegel",
+                    capacity = len,
+                    error = %e,
+                    "opening a session failed"
+                );
+                return Err(e);
+            }
+        };
 
         #[cfg(feature = "tracing")]
         if !session.is_locked() {
@@ -103,7 +107,66 @@ impl SessionCore {
         Ok(session)
     }
 
-    /// Opaque identifier handle for [`fill_into`].
+    fn register(len: u32) -> Result<Arc<Self>, SessionError> {
+        let len_usize = usize::try_from(len).map_err(|_| SessionError::InvalidLength)?;
+
+        // Hold the lock to the registry while allocation occurs to prevent
+        // race conditions that could exceed the maximum active sessions.
+        let mut registry = registry_lock();
+        registry.retain(|_, w| w.strong_count() > 0); // Prune dropped entries
+        if HELD.load(Ordering::Relaxed) >= MAX_ACTIVE_SESSIONS {
+            // Checked before allocation to avoid wasting resources
+            return Err(SessionError::TooManyActiveSessions);
+        }
+
+        let empty = Siegel::<Empty>::new(len_usize)?;
+        let handle_id = allocate_handle_id(&registry)?;
+
+        // Incremented under the registry lock, so concurrent `new`s can't both
+        // pass the check above. Releases may land anywhere; they only lower it.
+        HELD.fetch_add(1, Ordering::Relaxed);
+        let session = Arc::new(Self {
+            state: Mutex::new(SessionState::Empty(empty)),
+            handle_id,
+            capacity: len,
+            held: AtomicBool::new(true),
+        });
+        registry.insert(handle_id, Arc::downgrade(&session));
+        Ok(session)
+    }
+
+    /// Opens a session whose secret `f` writes straight into protected memory
+    /// (zeroed, full capacity), for foreign code to [`take_into`].
+    ///
+    /// If `f` fails, the bytes are zeroized, no session is returned and `f`'s
+    /// error is the inner `Result`. Read any input session inside `f`, so the
+    /// input isn't used up if the output can't be opened.
+    ///
+    /// # Errors
+    /// Same as [`SessionCore::new`], plus protection errors.
+    pub fn new_written<E, F>(len: u32, f: F) -> Result<Result<Arc<Self>, E>, SessionError>
+    where
+        F: FnOnce(&mut [u8]) -> Result<(), E>,
+    {
+        let session = Self::new(len)?;
+        let mut state = lock_state(&session.state);
+        let SessionState::Empty(empty) = std::mem::replace(&mut *state, SessionState::Consumed)
+        else {
+            // Unreachable: `session` is fresh and unshared.
+            return Err(SessionError::InvalidState);
+        };
+
+        let written = match empty.write_with(f)? {
+            Ok(written) => written,
+            // `write_with` already zeroized the partial output.
+            Err(e) => return Ok(Err(e)),
+        };
+        *state = SessionState::Written(written);
+        drop(state);
+        Ok(Ok(session))
+    }
+
+    /// Opaque identifier handle for [`fill_into`] and [`take_into`].
     ///
     /// Drawn from the OS CSPRNG to reduce the likelihood of
     /// accidental access by non-expected callers. It is not an infallible
@@ -117,7 +180,7 @@ impl SessionCore {
     ///
     /// Stable for the lifetime of the session. Callers can use this to
     /// verify the session matches the size they expected before invoking
-    /// [`read_once`](Self::read_once).
+    /// [`read_once`](Self::read_once), or to size the buffer for [`take_into`].
     #[must_use]
     #[expect(clippy::len_without_is_empty, reason = "sessions are always non-empty")]
     pub fn len(&self) -> u32 {
@@ -125,9 +188,15 @@ impl SessionCore {
     }
 
     /// Wipe the session without using it. Idempotent.
+    ///
+    /// Frees the protected memory and the session's slot under
+    /// [`MAX_ACTIVE_SESSIONS`]; the session object itself lives until the
+    /// binding releases it.
     pub fn obliviate(&self) {
         let mut state = lock_state(&self.state);
         *state = SessionState::Consumed; // automatically drops any loaded `Siegel`
+        drop(state);
+        self.release_slot();
     }
 
     /// Whether the session has been consumed or otherwise reached
@@ -137,20 +206,14 @@ impl SessionCore {
         matches!(*lock_state(&self.state), SessionState::Consumed)
     }
 
-    /// Whether the session is still empty and therefore fillable.
-    ///
-    /// Advisory only: the state can change before the caller acts on it.
-    #[must_use]
-    pub fn is_fillable(&self) -> bool {
-        matches!(*lock_state(&self.state), SessionState::Empty(_))
-    }
-
     /// Whether the secret's pages are locked in RAM (`mlock`ed).
+    ///
+    /// Always `false` once consumed: the session holds no pages to lock.
     #[must_use]
     pub fn is_locked(&self) -> bool {
         match &*lock_state(&self.state) {
             SessionState::Empty(s) => s.is_locked(),
-            SessionState::Loaded(s) => s.is_locked(),
+            SessionState::Filled(s) | SessionState::Written(s) => s.is_locked(),
             SessionState::Consumed => false,
         }
     }
@@ -162,10 +225,21 @@ impl SessionCore {
     /// of the plaintext copy and can wipe it as soon as this returns.
     ///
     /// # Errors
-    /// - `LengthMismatch` if `bytes.len()` doesn't equal the session's capacity.
     /// - `InvalidState` if the session was already filled or consumed.
+    /// - `LengthMismatch` if `bytes.len()` doesn't equal the session's capacity.
     /// - Protection errors propagate from `siegel`.
     pub fn fill(&self, bytes: &[u8]) -> Result<(), SessionError> {
+        self.fill_with(bytes.len(), || bytes)
+    }
+
+    /// Fill from `bytes()`, called only once the state and `len` check out, so
+    /// a raw caller's wrong length never becomes a slice. The checks and the
+    /// write share one critical section.
+    fn fill_with<'a>(
+        &self,
+        len: usize,
+        bytes: impl FnOnce() -> &'a [u8],
+    ) -> Result<(), SessionError> {
         let mut state = lock_state(&self.state);
 
         // Set a `Consumed` state to ensure it is persisted on errors.
@@ -177,18 +251,21 @@ impl SessionCore {
             }
         };
 
-        if empty.len() != bytes.len() {
+        if empty.len() != len {
             *state = SessionState::Empty(empty);
             return Err(SessionError::LengthMismatch);
         }
 
-        match empty.write(bytes) {
+        match empty.write(bytes()) {
             Ok(loaded) => {
-                *state = SessionState::Loaded(loaded);
+                *state = SessionState::Filled(loaded);
                 Ok(())
             }
             Err(e) => {
                 // Siegel::write consumed `empty` on failure. State stays Consumed.
+                // Release before emitting, for the same reason as in `new`.
+                drop(state);
+                self.release_slot();
                 #[cfg(feature = "tracing")]
                 tracing::warn!(
                     target: "siegel",
@@ -205,7 +282,7 @@ impl SessionCore {
     /// used once.
     ///
     /// # Errors
-    /// - `InvalidState` if the session hasn't been filled.
+    /// - `InvalidState` if the session holds no secret yet.
     /// - `Consumed` if already consumed.
     /// - OS-level memory errors.
     pub fn read_once<T, F>(&self, f: F) -> Result<T, SessionError>
@@ -215,7 +292,7 @@ impl SessionCore {
         let loaded = {
             let mut state = lock_state(&self.state);
             match std::mem::replace(&mut *state, SessionState::Consumed) {
-                SessionState::Loaded(s) => s,
+                SessionState::Filled(s) | SessionState::Written(s) => s,
                 SessionState::Empty(s) => {
                     *state = SessionState::Empty(s);
                     return Err(SessionError::InvalidState);
@@ -225,18 +302,84 @@ impl SessionCore {
         };
 
         let result = loaded.read_once(f);
+        self.release_slot();
         #[cfg(feature = "tracing")]
         if let Err(e) = &result {
             tracing::warn!(target: "siegel", error = %e, "reading the secret failed");
         }
         result.map_err(SessionError::from)
     }
+
+    /// Copy a `Written` secret into `dst`, then wipe and consume the session.
+    ///
+    /// # Safety
+    /// Same as [`take_into`].
+    unsafe fn take(&self, dst: *mut u8, len: usize) -> i32 {
+        let mut state = lock_state(&self.state);
+
+        let written = match std::mem::replace(&mut *state, SessionState::Consumed) {
+            SessionState::Written(s) => s,
+            other => {
+                *state = other;
+                return TAKE_ERR_WRONG_STATE;
+            }
+        };
+
+        if written.len() != len {
+            *state = SessionState::Written(written);
+            return TAKE_ERR_LEN_MISMATCH;
+        }
+
+        // SAFETY: the caller guarantees `dst`; `len == bytes.len()` was checked above.
+        let copied = written.read_once(|bytes| unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, len);
+        });
+        // Siegel::read_once consumed `written` either way. State stays Consumed.
+        drop(state);
+        self.release_slot();
+
+        let Err(e) = copied else {
+            return TAKE_OK;
+        };
+
+        // A failed reseal surfaces after the copy ran, so wipe `dst` with writes the
+        // compiler can't drop. `MaybeUninit` because on other errors `dst` was never written.
+        // SAFETY: the caller guarantees `dst` is valid and ours alone for `len` bytes.
+        unsafe { std::slice::from_raw_parts_mut(dst.cast::<std::mem::MaybeUninit<u8>>(), len) }
+            .zeroize();
+
+        #[cfg(feature = "tracing")]
+        tracing::error!(target: "siegel", error = %e, "take failed; destination wiped");
+
+        match e {
+            SiegelError::CanaryCorrupted => TAKE_ERR_CANARY,
+            SiegelError::ProtectionFailed { .. }
+            | SiegelError::AllocationFailed { .. }
+            | SiegelError::InvalidLength
+            | SiegelError::LengthMismatch { .. } => TAKE_ERR_PROTECTION,
+        }
+    }
+
+    /// Stop counting this session toward [`MAX_ACTIVE_SESSIONS`]. Idempotent.
+    fn release_slot(&self) {
+        if self.held.swap(false, Ordering::Relaxed) {
+            HELD.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Drop for SessionCore {
     fn drop(&mut self) {
-        // The Arc is probably dropped, but clean up the stale entry from the registry
-        registry_lock().remove(&self.handle_id);
+        self.release_slot();
+        // Only evict our own entry: if a concurrent prune already removed it,
+        // the id may since have been issued to a live session.
+        let mut registry = registry_lock();
+        if registry
+            .get(&self.handle_id)
+            .is_some_and(|w| std::ptr::eq(w.as_ptr(), self))
+        {
+            registry.remove(&self.handle_id);
+        }
     }
 }
 
@@ -263,36 +406,89 @@ pub const FILL_ERR_PROTECTION: i32 = -5;
 /// # Safety
 ///
 /// - `src` **MUST** be valid for `len` bytes of read. This is the caller's responsibility.
-/// - The caller must not race fills against `read_once` or
-///   `obliviate` on the same session.
+/// - Nothing may write to `src` until the call returns.
+///
+/// # Concurrency
+///
+/// Fills racing `read_once` or `obliviate` on the same session are memory-safe,
+/// but which one wins is arbitrary.
 #[must_use]
 pub unsafe fn fill_into(handle: u64, src: *const u8, len: usize) -> i32 {
     if src.is_null() {
-        return FILL_ERR_NULL_SRC;
+        return rejected("fill", FILL_ERR_NULL_SRC);
     }
 
     // Ensure the provided handle is valid
     let Some(session) = lookup(handle) else {
-        return FILL_ERR_INVALID_HANDLE;
+        return rejected("fill", FILL_ERR_INVALID_HANDLE);
     };
 
-    if !session.is_fillable() {
-        return FILL_ERR_WRONG_STATE;
-    }
-
-    if session.len() as usize != len {
-        return FILL_ERR_LEN_MISMATCH;
-    }
-
-    // SAFETY: `src` is valid for `len` bytes if the caller implemented correctly
-    let bytes = unsafe { std::slice::from_raw_parts(src, len) };
-
-    match session.fill(bytes) {
+    // SAFETY: only reached once `len` equals the capacity, and the caller
+    // guarantees `src` is valid for `len` bytes.
+    match session.fill_with(len, || unsafe { std::slice::from_raw_parts(src, len) }) {
         Ok(()) => FILL_OK,
-        Err(SessionError::LengthMismatch) => FILL_ERR_LEN_MISMATCH,
-        Err(SessionError::InvalidState) => FILL_ERR_WRONG_STATE,
+        Err(SessionError::LengthMismatch) => rejected("fill", FILL_ERR_LEN_MISMATCH),
+        Err(SessionError::InvalidState) => rejected("fill", FILL_ERR_WRONG_STATE),
+        // `fill_with` logged the cause.
         Err(_) => FILL_ERR_PROTECTION,
     }
+}
+
+pub const TAKE_OK: i32 = 0;
+pub const TAKE_ERR_INVALID_HANDLE: i32 = -1;
+pub const TAKE_ERR_LEN_MISMATCH: i32 = -2;
+pub const TAKE_ERR_NULL_DST: i32 = -3;
+pub const TAKE_ERR_WRONG_STATE: i32 = -4;
+pub const TAKE_ERR_PROTECTION: i32 = -5;
+pub const TAKE_ERR_CANARY: i32 = -6;
+
+/// Copies a secret Rust wrote with [`SessionCore::new_written`] into `dst`,
+/// then wipes and consumes the session. The reverse of [`fill_into`], skipping
+/// the binding generator's non-zeroized copies. Zeroizing `dst` is the caller's job.
+///
+/// A session filled by [`fill_into`] can't be taken (`TAKE_ERR_WRONG_STATE`).
+/// On [`TAKE_ERR_CANARY`] and [`TAKE_ERR_PROTECTION`] `dst` is zeroed; other
+/// errors leave it untouched.
+///
+/// Like [`fill_into`], binding crates re-export this behind their own symbol.
+///
+/// # Arguments
+/// - `handle`: from [`SessionCore::handle_id()`].
+/// - `dst`: where to copy the bytes.
+/// - `len`: size of `dst`; must equal the session's capacity.
+///
+/// # Safety
+///
+/// - `dst` **MUST** be valid for reads and writes of `len` bytes, and not accessed
+///   elsewhere until the call returns.
+/// - `dst` must not overlap the session's protected memory.
+#[must_use]
+pub unsafe fn take_into(handle: u64, dst: *mut u8, len: usize) -> i32 {
+    if dst.is_null() {
+        return rejected("take", TAKE_ERR_NULL_DST);
+    }
+
+    let Some(session) = lookup(handle) else {
+        return rejected("take", TAKE_ERR_INVALID_HANDLE);
+    };
+
+    // SAFETY: forwarded verbatim; the caller upholds this function's contract.
+    match unsafe { session.take(dst, len) } {
+        code @ (TAKE_ERR_LEN_MISMATCH | TAKE_ERR_WRONG_STATE) => rejected("take", code),
+        // Success, or a failure `take` already logged.
+        code => code,
+    }
+}
+
+/// Log a rejected raw call: foreign code only sees the bare code.
+#[cfg_attr(
+    not(feature = "tracing"),
+    expect(unused_variables, reason = "`op` is only logged")
+)]
+fn rejected(op: &'static str, code: i32) -> i32 {
+    #[cfg(feature = "tracing")]
+    tracing::warn!(target: "siegel", op, code, "raw session call rejected");
+    code
 }
 
 /// Resolve a live session from its handle.
@@ -303,7 +499,10 @@ fn lookup(handle: u64) -> Option<Arc<SessionCore>> {
 /// The state of the session.
 enum SessionState {
     Empty(Siegel<Empty>),
-    Loaded(Siegel<Loaded>),
+    /// Filled by foreign code ([`fill_into`]); only Rust can read it.
+    Filled(Siegel<Loaded>),
+    /// Written by Rust ([`SessionCore::new_written`]); Rust or [`take_into`] can read it.
+    Written(Siegel<Loaded>),
     Consumed,
 }
 
@@ -338,7 +537,7 @@ fn lock_state(s: &Mutex<SessionState>) -> MutexGuard<'_, SessionState> {
 /// Errors surfaced to foreign bindings.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
-    #[error("requested length must be 1..=1Mb")]
+    #[error("requested length must be 1..=1MiB")]
     InvalidLength,
     #[error("input length doesn't match the session's capacity")]
     LengthMismatch,
@@ -387,7 +586,9 @@ impl SessionCore {
         let state = lock_state(&self.state);
         match &*state {
             SessionState::Empty(s) => unsafe { s.test_touch_front_guard() },
-            SessionState::Loaded(s) => unsafe { s.test_touch_front_guard() },
+            SessionState::Filled(s) | SessionState::Written(s) => unsafe {
+                s.test_touch_front_guard();
+            },
             SessionState::Consumed => {}
         }
     }
@@ -396,12 +597,31 @@ impl SessionCore {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
+    use std::convert::Infallible;
+
     use sha2::{Digest, Sha256};
 
     use super::*;
 
     fn fill(session: &Arc<SessionCore>, bytes: &[u8]) -> i32 {
         unsafe { fill_into(session.handle_id(), bytes.as_ptr(), bytes.len()) }
+    }
+
+    fn take(session: &Arc<SessionCore>, dst: &mut [u8]) -> i32 {
+        unsafe { take_into(session.handle_id(), dst.as_mut_ptr(), dst.len()) }
+    }
+
+    /// Non-secret filler that rejected takes must leave in `dst`.
+    const SENTINEL: u8 = 0xA5;
+
+    fn written(bytes: &[u8]) -> Arc<SessionCore> {
+        let len = u32::try_from(bytes.len()).unwrap();
+        let Ok(session) = SessionCore::new_written(len, |buf| {
+            buf.copy_from_slice(bytes);
+            Ok::<_, Infallible>(())
+        })
+        .unwrap();
+        session
     }
 
     #[test]
@@ -512,6 +732,20 @@ mod tests {
         assert_eq!(rc, FILL_ERR_INVALID_HANDLE);
     }
 
+    /// Sessions dropped on the foreign side should not pin the registry
+    /// forever. The opportunistic prune in `new` makes capacity available
+    /// again for subsequent allocations.
+    #[test]
+    fn registry_prunes_dropped_sessions() {
+        let handle = {
+            let s = SessionCore::new(8).unwrap();
+            s.handle_id()
+        };
+        let _next = SessionCore::new(8).unwrap();
+        let rc = unsafe { fill_into(handle, [0u8; 8].as_ptr(), 8) };
+        assert_eq!(rc, FILL_ERR_INVALID_HANDLE);
+    }
+
     #[test]
     fn distinct_sessions_have_distinct_handles() {
         let a = SessionCore::new(8).unwrap();
@@ -542,6 +776,17 @@ mod tests {
     }
 
     #[test]
+    fn is_locked_reports_live_and_consumed_sessions() {
+        let s = SessionCore::new(8).unwrap();
+        let empty_locked = s.is_locked();
+        assert_eq!(fill(&s, &[1u8; 8]), FILL_OK);
+        // The region is allocated once, so filling can't change its lock.
+        assert_eq!(s.is_locked(), empty_locked);
+        s.obliviate();
+        assert!(!s.is_locked());
+    }
+
+    #[test]
     fn wrong_state_outranks_length_mismatch() {
         let s = SessionCore::new(8).unwrap();
         assert_eq!(fill(&s, &[1u8; 8]), FILL_OK);
@@ -549,6 +794,38 @@ mod tests {
         // Consumed *and* the wrong length: the state must win.
         let rc = unsafe { fill_into(s.handle_id(), [0u8; 4].as_ptr(), 4) };
         assert_eq!(rc, FILL_ERR_WRONG_STATE);
+    }
+
+    #[test]
+    fn concurrent_fills_succeed_exactly_once() {
+        const THREADS: usize = 8;
+        let s = SessionCore::new(8).unwrap();
+        let handle = s.handle_id();
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+
+        let threads: Vec<_> = (0..THREADS)
+            .map(|i| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let byte = u8::try_from(i).unwrap();
+                    let bytes = [byte; 8];
+                    barrier.wait();
+                    (byte, unsafe { fill_into(handle, bytes.as_ptr(), 8) })
+                })
+            })
+            .collect();
+
+        let mut winners = Vec::new();
+        for t in threads {
+            let (byte, rc) = t.join().unwrap();
+            if rc == FILL_OK {
+                winners.push(byte);
+            } else {
+                assert_eq!(rc, FILL_ERR_WRONG_STATE);
+            }
+        }
+        assert_eq!(winners.len(), 1);
+        assert_eq!(s.read_once(<[u8]>::to_vec).unwrap(), vec![winners[0]; 8]);
     }
 
     #[test]
@@ -583,5 +860,220 @@ mod tests {
         s.read_once(<[u8]>::to_vec).unwrap();
         let err = s.fill(&[1u8; 8]).unwrap_err();
         assert!(matches!(err, SessionError::InvalidState));
+    }
+
+    #[test]
+    fn fill_wipes_and_consumes_when_seal_fails() {
+        let s = SessionCore::new(8).unwrap();
+        crate::test_utils::fail_next_reseal();
+        assert_eq!(fill(&s, &[1u8; 8]), FILL_ERR_PROTECTION);
+        assert!(s.is_consumed());
+    }
+
+    #[test]
+    fn written_then_take_round_trips() {
+        let s = written(&Sha256::digest(b"seed"));
+        assert_eq!(s.len(), 32);
+        assert!(!s.is_consumed());
+
+        let mut out = [SENTINEL; 32];
+        assert_eq!(take(&s, &mut out), TAKE_OK);
+        assert_eq!(out.to_vec(), Sha256::digest(b"seed").to_vec());
+        assert!(s.is_consumed());
+    }
+
+    #[test]
+    fn new_written_can_derive_from_an_input_session() {
+        let input = SessionCore::new(16).unwrap();
+        assert_eq!(fill(&input, &[0x42; 16]), FILL_OK);
+        let output = SessionCore::new_written(32, |buf| {
+            input.read_once(|seed| buf.copy_from_slice(&Sha256::digest(seed)))
+        })
+        .unwrap()
+        .unwrap();
+        assert!(input.is_consumed());
+
+        let digest = output.read_once(<[u8]>::to_vec).unwrap();
+        assert_eq!(digest, Sha256::digest([0x42; 16]).to_vec());
+    }
+
+    #[test]
+    fn new_written_returns_closure_error_and_no_session() {
+        let input = SessionCore::new(8).unwrap();
+        let inner = SessionCore::new_written(8, |buf| {
+            buf.fill(0xAA);
+            input.read_once(|seed| buf.copy_from_slice(seed))
+        })
+        .unwrap();
+        assert!(matches!(inner, Err(SessionError::InvalidState)));
+        assert!(!input.is_consumed());
+    }
+
+    #[test]
+    #[expect(clippy::panic, reason = "deliberately panicking inside the closure")]
+    fn new_written_panic_leaves_sessions_usable() {
+        let result = std::panic::catch_unwind(|| {
+            SessionCore::new_written(8, |_| -> Result<(), Infallible> {
+                panic!("derivation failed")
+            })
+        });
+        assert!(result.is_err());
+        let s = SessionCore::new(8).unwrap();
+        assert_eq!(fill(&s, &[1u8; 8]), FILL_OK);
+        assert_eq!(s.read_once(<[u8]>::to_vec).unwrap(), vec![1u8; 8]);
+    }
+
+    #[test]
+    fn new_written_rejects_zero_length() {
+        let result = SessionCore::new_written(0, |_| Ok::<_, Infallible>(()));
+        assert!(matches!(result, Err(SessionError::InvalidLength)));
+    }
+
+    #[test]
+    fn fill_rejects_written_session() {
+        let s = written(&[3u8; 8]);
+        assert_eq!(fill(&s, &[4u8; 8]), FILL_ERR_WRONG_STATE);
+        let mut out = [SENTINEL; 8];
+        assert_eq!(take(&s, &mut out), TAKE_OK);
+        assert_eq!(out, [3u8; 8]);
+    }
+
+    #[test]
+    fn take_rejects_null_dst() {
+        let s = written(&[5u8; 8]);
+        let rc = unsafe { take_into(s.handle_id(), std::ptr::null_mut(), 8) };
+        assert_eq!(rc, TAKE_ERR_NULL_DST);
+        assert!(!s.is_consumed());
+    }
+
+    #[test]
+    fn take_rejects_unknown_handle() {
+        let mut out = [SENTINEL; 8];
+        let rc = unsafe { take_into(127, out.as_mut_ptr(), 8) };
+        assert_eq!(rc, TAKE_ERR_INVALID_HANDLE);
+        assert_eq!(out, [SENTINEL; 8]);
+    }
+
+    #[test]
+    fn take_rejects_wrong_length_and_recovers() {
+        let s = written(&[6u8; 16]);
+        let mut short = [SENTINEL; 8];
+        assert_eq!(take(&s, &mut short), TAKE_ERR_LEN_MISMATCH);
+        assert_eq!(short, [SENTINEL; 8]);
+        let mut out = [SENTINEL; 16];
+        assert_eq!(take(&s, &mut out), TAKE_OK);
+        assert_eq!(out, [6u8; 16]);
+    }
+
+    /// A leaked or mixed-up handle must not read back a secret foreign code filled.
+    #[test]
+    fn take_rejects_filled_session() {
+        let s = SessionCore::new(8).unwrap();
+        assert_eq!(fill(&s, &[0x5E; 8]), FILL_OK);
+        let mut out = [SENTINEL; 8];
+        assert_eq!(take(&s, &mut out), TAKE_ERR_WRONG_STATE);
+        assert_eq!(out, [SENTINEL; 8]);
+        assert_eq!(s.read_once(<[u8]>::to_vec).unwrap(), vec![0x5E; 8]);
+    }
+
+    #[test]
+    fn concurrent_takes_succeed_exactly_once() {
+        const THREADS: usize = 8;
+        let s = written(&[0x5A; 8]);
+        let handle = s.handle_id();
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+
+        let mut threads = Vec::new();
+        for i in 0..THREADS {
+            let barrier = Arc::clone(&barrier);
+            // Odd threads race a wrong-length take against the real ones.
+            let len = if i % 2 == 0 { 8 } else { 4 };
+            threads.push(std::thread::spawn(move || {
+                let mut out = vec![SENTINEL; len];
+                barrier.wait();
+                let rc = unsafe { take_into(handle, out.as_mut_ptr(), len) };
+                (len, rc, out)
+            }));
+        }
+
+        let mut taken = 0;
+        for t in threads {
+            let (len, rc, out) = t.join().unwrap();
+            if rc == TAKE_OK {
+                taken += 1;
+                assert_eq!(out, vec![0x5A; 8]);
+                continue;
+            }
+            assert!(out.iter().all(|&b| b == SENTINEL));
+            if len == 8 {
+                assert_eq!(rc, TAKE_ERR_WRONG_STATE);
+            } else {
+                assert!(rc == TAKE_ERR_LEN_MISMATCH || rc == TAKE_ERR_WRONG_STATE);
+            }
+        }
+        assert_eq!(taken, 1);
+        assert!(s.is_consumed());
+    }
+
+    #[test]
+    fn take_rejects_empty_session() {
+        let s = SessionCore::new(8).unwrap();
+        let mut out = [SENTINEL; 8];
+        assert_eq!(take(&s, &mut out), TAKE_ERR_WRONG_STATE);
+        assert_eq!(out, [SENTINEL; 8]);
+        assert!(!s.is_consumed());
+    }
+
+    #[test]
+    fn second_take_rejected() {
+        let s = written(&[7u8; 8]);
+        assert_eq!(take(&s, &mut [0u8; 8]), TAKE_OK);
+        let mut again = [SENTINEL; 8];
+        assert_eq!(take(&s, &mut again), TAKE_ERR_WRONG_STATE);
+        assert_eq!(again, [SENTINEL; 8]);
+    }
+
+    #[test]
+    fn take_rejected_after_obliviate() {
+        let s = written(&[8u8; 8]);
+        s.obliviate();
+        let mut out = [SENTINEL; 8];
+        assert_eq!(take(&s, &mut out), TAKE_ERR_WRONG_STATE);
+        assert_eq!(out, [SENTINEL; 8]);
+    }
+
+    #[test]
+    fn take_reports_canary_corruption_and_consumes() {
+        let s = written(&[0xEE; 8]);
+        // Zeroizing wipes the canary along with the data.
+        if let SessionState::Written(siegel) = &mut *lock_state(&s.state) {
+            siegel.zeroize();
+        }
+        let mut out = [SENTINEL; 8];
+        assert_eq!(take(&s, &mut out), TAKE_ERR_CANARY);
+        assert_eq!(out, [0u8; 8], "dst must be wiped on a failed take");
+        assert!(s.is_consumed());
+    }
+
+    #[test]
+    fn take_wipes_dst_when_reseal_fails_after_copy() {
+        let s = written(&[0xC3; 8]);
+        let mut out = [SENTINEL; 8];
+        crate::test_utils::fail_next_reseal();
+        assert_eq!(take(&s, &mut out), TAKE_ERR_PROTECTION);
+        assert_eq!(out, [0u8; 8], "the copied secret must be wiped");
+        assert!(s.is_consumed());
+    }
+
+    #[test]
+    fn take_rejected_after_session_drop() {
+        let handle = {
+            let s = written(&[9u8; 8]);
+            s.handle_id()
+        };
+        let mut out = [SENTINEL; 8];
+        let rc = unsafe { take_into(handle, out.as_mut_ptr(), 8) };
+        assert_eq!(rc, TAKE_ERR_INVALID_HANDLE);
+        assert_eq!(out, [SENTINEL; 8]);
     }
 }
